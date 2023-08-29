@@ -10,33 +10,31 @@ const std = @import("std");
 
 // for this prototype, we're doing megastruct without active/inactive components
 
-pub const Handle = packed struct {
+pub const Handle = u32;
+pub const HandleDetail = packed struct {
     generation: u24,
     slot: u8,
 };
 
 pub fn MemoryPool(comptime Item: type) type {
-    // this is basically std.heap.MemoryPool
-    // with some features added/removed
+    // this is loosely based on std.heap.MemoryPool
+    // but needs to include reference counting
 
     return struct {
         const Self = @This();
 
-        pub const item_size = @max(@sizeOf(Node), @sizeOf(Item));
-        // note the hack for the alignment of a node
-        // since the node definition needs to access this
-        // using Node in the definition would be circular
-        // however, presumably all pointers have the same alignment
-        // and the fact that it's a struct member should add nothing
-        // so we can just use a pointer to whatever as a proxy
-        pub const item_alignment = @max(@alignOf(?*usize), @alignOf(Item));
+        pub const RefCounted = struct {
+            item: Item,
+            count: u32,
+        };
 
-        const Node = struct {
-            next: ?*align(item_alignment) @This(),
+        pub const Node = union {
+            rc: RefCounted,
+            next: ?*Node,
         };
 
         arena: std.heap.ArenaAllocator,
-        free_list: ?*align(item_alignment) Node = null,
+        free_list: ?*Node = null,
 
         pub fn init(alloc: std.mem.Allocator) Self {
             return Self{
@@ -49,20 +47,14 @@ pub fn MemoryPool(comptime Item: type) type {
             pool.* = undefined;
         }
 
-        pub fn create(pool: *Self) *Item {
+        pub fn create(pool: *Self) *RefCounted {
             const node = if (pool.free_list) |item| blk: {
                 pool.free_list = item.next;
                 break :blk item;
-            } else @as(*align(item_alignment) Node, @ptrCast(pool.allocNew()));
+            } else pool.arena.allocator().create(Node) catch unreachable;
 
-            const ptr = @as(*Item, @alignCast(@ptrCast(node)));
-            ptr.* = undefined;
-            return ptr;
-        }
-
-        fn allocNew(pool: *Self) *align(item_alignment) [item_size]u8 {
-            const mem = pool.arena.allocator().alignedAlloc(u8, item_alignment, item_size) catch unreachable;
-            return mem[0..item_size];
+            node.* = Node{ .rc = RefCounted{ .item = undefined, .count = 1 } };
+            return @ptrCast(node);
         }
     };
 }
@@ -74,12 +66,14 @@ pub fn State(comptime Item: type) type {
         const Self = @This();
 
         pub const max_items = 256;
+        pub const RefCounted = MemoryPool(Item).RefCounted;
 
         alloc: std.mem.Allocator,
         pool: *MemoryPool(Item),
         prev: ?*Self,
 
-        sparse: [max_items]?*Item,
+        sparse: [max_items]?*RefCounted,
+        n_items: u32 = 0, // TODO properly reuse slots
 
         pub fn init(alloc: std.mem.Allocator, pool: *MemoryPool(Item)) *Self {
             var prev = alloc.create(Self) catch unreachable;
@@ -87,7 +81,7 @@ pub fn State(comptime Item: type) type {
                 .alloc = alloc,
                 .pool = pool,
                 .prev = null,
-                .sparse = [_]?*Item{null} ** max_items,
+                .sparse = [_]?*RefCounted{null} ** max_items,
             };
 
             var state = alloc.create(Self) catch unreachable;
@@ -95,8 +89,55 @@ pub fn State(comptime Item: type) type {
                 .alloc = alloc,
                 .pool = pool,
                 .prev = prev,
+                .sparse = [_]?*RefCounted{null} ** max_items,
             };
             return state;
+        }
+
+        /// state transition, sets current state as prev
+        pub fn step(state: *Self) *Self {
+            var next = state.alloc.create(Self) catch unreachable;
+            next.* = state.*;
+            next.prev = state;
+            for (0..max_items) |i| {
+                if (next.sparse[i] != null) {
+                    next.sparse[i].?.count += 1;
+                }
+            }
+            return next;
+        }
+
+        pub fn create(state: *Self) Handle {
+            const handle = state.n_items;
+            const rc = state.pool.create();
+            state.sparse[handle] = rc;
+            return handle;
+        }
+
+        pub fn get(state: *Self, handle: Handle) ?*const Item {
+            // note how COW means we shouldn't unconditionally return a pointer
+            if (state.sparse[handle]) |rc| {
+                return &rc.item;
+            }
+            return null;
+        }
+
+        pub fn set(state: *Self, handle: Handle, item: Item) void {
+            // copy if refcount > 1, else just overwrite
+            if (state.sparse[handle]) |rc| {
+                std.debug.print("{*}\n", .{rc});
+                std.debug.assert(rc.count > 0);
+                if (rc.count == 1) {
+                    rc.item = item;
+                } else {
+                    const newrc = state.pool.create();
+                    newrc.item = item;
+                    state.sparse[handle] = newrc;
+                    rc.count -= 1;
+                }
+            } else {
+                std.log.warn("called set with invalid handle {} (NOOP)", .{handle});
+            }
         }
     };
 }
@@ -113,19 +154,29 @@ pub fn main() !void {
     var pool = MemoryPool(_E).init(alloc);
     defer pool.deinit();
 
-    std.debug.print("{} {}\n", .{ @TypeOf(pool).item_size, @TypeOf(pool).item_alignment });
+    std.debug.print("{} {}\n", .{
+        @sizeOf(@TypeOf(pool).Node),
+        @alignOf(@TypeOf(pool).Node),
+    });
 
     var state = State(_E).init(alloc, &pool);
     std.debug.print("{*}\n", .{state});
     std.debug.print("{*}\n", .{state.prev});
     std.debug.print("{*}\n", .{state.prev.?.prev});
 
-    var a = pool.create();
-    std.debug.print("{*}\n", .{a});
-    std.debug.print("{}\n", .{a.*});
-    var b = pool.create();
-    std.debug.print("{*}\n", .{b});
-    std.debug.print("{}\n", .{b.*});
+    var a = state.create();
+    std.debug.print("{*}\n", .{state.get(a)});
+    std.debug.print("{}\n", .{state.get(a).?.*});
+    state.set(a, _E{ .pos = @splat(1), .hp = 123 });
+    std.debug.print("{*}\n", .{state.get(a)});
+    std.debug.print("{}\n", .{state.get(a).?.*});
+
+    state = state.step();
+    std.debug.print("{*}\n", .{state.get(a)});
+    std.debug.print("{}\n", .{state.get(a).?.*});
+    state.set(a, _E{ .pos = @splat(2), .hp = 234 });
+    std.debug.print("{*}\n", .{state.get(a)});
+    std.debug.print("{}\n", .{state.get(a).?.*});
 }
 
 test "simple test" {}
