@@ -36,6 +36,9 @@ pub fn MemoryPool(comptime Item: type) type {
         arena: std.heap.ArenaAllocator,
         free_list: ?*Node = null,
 
+        // not needed, but fun stats
+        total_allocations: usize = 0,
+
         pub fn init(alloc: std.mem.Allocator) Self {
             return Self{
                 .arena = std.heap.ArenaAllocator.init(alloc),
@@ -49,9 +52,14 @@ pub fn MemoryPool(comptime Item: type) type {
 
         pub fn create(pool: *Self) *RefCounted {
             const node = if (pool.free_list) |item| blk: {
+                std.debug.print("reused\n", .{});
                 pool.free_list = item.next;
                 break :blk item;
-            } else pool.arena.allocator().create(Node) catch unreachable;
+            } else blk: {
+                std.debug.print("allocated\n", .{});
+                pool.total_allocations += 1;
+                break :blk pool.arena.allocator().create(Node) catch unreachable;
+            };
 
             node.* = Node{ .rc = RefCounted{ .item = undefined, .count = 1 } };
             return @ptrCast(node);
@@ -59,6 +67,7 @@ pub fn MemoryPool(comptime Item: type) type {
 
         /// return an Item to the memorypool so it can be reused
         pub fn destroy(pool: *Self, ptr: *RefCounted) void {
+            std.debug.print("returned\n", .{});
             const node: *Node = @ptrCast(ptr);
 
             node.* = Node{ .next = pool.free_list };
@@ -104,11 +113,15 @@ pub fn State(comptime Item: type) type {
         }
 
         /// state transition, sets current state as prev
-        /// deletes step older than max_steps
+        /// deletes states older than max_steps
         pub fn step(state: *Self) *Self {
             var next = state.alloc.create(Self) catch unreachable;
-            next.* = state.*;
-            next.prev = state;
+            next.* = Self{
+                .alloc = state.alloc,
+                .pool = state.pool,
+                .prev = state,
+                .sparse = state.sparse,
+            };
             for (0..max_items) |i| {
                 if (next.sparse[i] != null) {
                     next.sparse[i].?.count += 1;
@@ -118,15 +131,22 @@ pub fn State(comptime Item: type) type {
             var first = next;
             var second = first;
             var j: usize = 0;
-            while (first.prev) |prev| {
-                j += 1;
-                second = first;
-                first = prev;
+            while (true) {
+                if (first.prev != null) {
+                    j += 1;
+                    second = first;
+                    first = first.prev.?;
+                } else {
+                    break;
+                }
             }
-            second.prev = null;
+            std.debug.print("j {}\n", .{j});
             if (j > max_steps) {
+                second.prev = null;
+                std.debug.print("YO\n", .{});
                 for (0..max_items) |i| {
                     if (first.sparse[i] != null) {
+                        std.debug.print("{}\n", .{first.sparse[i].?.*});
                         std.debug.assert(first.sparse[i].?.count > 0);
                         if (first.sparse[i].?.count == 1) {
                             state.pool.destroy(first.sparse[i].?);
@@ -211,13 +231,20 @@ pub fn main() !void {
     std.debug.print("{*}\n", .{state.get(a)});
     std.debug.print("{}\n", .{state.get(a).?.*});
 
-    for (0..100) |i| {
+    var b = state.create();
+    for (0..50) |i| {
         if ((i * i + i) % 3 == 0) {
             state.set(a, _E{ .pos = @splat(@floatFromInt(i)), .hp = 234 });
         }
+        if ((i) % 5 == 0) {
+            state.set(b, _E{ .pos = @splat(@floatFromInt(i)), .hp = 123 });
+        }
         std.debug.print("{}\n", .{i});
         state = state.step();
+        std.debug.print("{*}\n", .{state});
     }
+
+    std.debug.print("total allocations {}\n", .{pool.total_allocations});
 }
 
 test "simple test" {}
