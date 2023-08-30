@@ -56,6 +56,14 @@ pub fn MemoryPool(comptime Item: type) type {
             node.* = Node{ .rc = RefCounted{ .item = undefined, .count = 1 } };
             return @ptrCast(node);
         }
+
+        /// return an Item to the memorypool so it can be reused
+        pub fn destroy(pool: *Self, ptr: *RefCounted) void {
+            const node: *Node = @ptrCast(ptr);
+
+            node.* = Node{ .next = pool.free_list };
+            pool.free_list = node;
+        }
     };
 }
 
@@ -66,6 +74,7 @@ pub fn State(comptime Item: type) type {
         const Self = @This();
 
         pub const max_items = 256;
+        pub const max_steps = 4;
         pub const RefCounted = MemoryPool(Item).RefCounted;
 
         alloc: std.mem.Allocator,
@@ -95,6 +104,7 @@ pub fn State(comptime Item: type) type {
         }
 
         /// state transition, sets current state as prev
+        /// deletes step older than max_steps
         pub fn step(state: *Self) *Self {
             var next = state.alloc.create(Self) catch unreachable;
             next.* = state.*;
@@ -104,6 +114,30 @@ pub fn State(comptime Item: type) type {
                     next.sparse[i].?.count += 1;
                 }
             }
+
+            var first = next;
+            var second = first;
+            var j: usize = 0;
+            while (first.prev) |prev| {
+                j += 1;
+                second = first;
+                first = prev;
+            }
+            second.prev = null;
+            if (j > max_steps) {
+                for (0..max_items) |i| {
+                    if (first.sparse[i] != null) {
+                        std.debug.assert(first.sparse[i].?.count > 0);
+                        if (first.sparse[i].?.count == 1) {
+                            state.pool.destroy(first.sparse[i].?);
+                        } else {
+                            first.sparse[i].?.count -= 1;
+                        }
+                    }
+                }
+                state.alloc.destroy(first);
+            }
+
             return next;
         }
 
@@ -125,7 +159,6 @@ pub fn State(comptime Item: type) type {
         pub fn set(state: *Self, handle: Handle, item: Item) void {
             // copy if refcount > 1, else just overwrite
             if (state.sparse[handle]) |rc| {
-                std.debug.print("{*}\n", .{rc});
                 std.debug.assert(rc.count > 0);
                 if (rc.count == 1) {
                     rc.item = item;
@@ -177,6 +210,14 @@ pub fn main() !void {
     state.set(a, _E{ .pos = @splat(2), .hp = 234 });
     std.debug.print("{*}\n", .{state.get(a)});
     std.debug.print("{}\n", .{state.get(a).?.*});
+
+    for (0..100) |i| {
+        if ((i * i + i) % 3 == 0) {
+            state.set(a, _E{ .pos = @splat(@floatFromInt(i)), .hp = 234 });
+        }
+        std.debug.print("{}\n", .{i});
+        state = state.step();
+    }
 }
 
 test "simple test" {}
