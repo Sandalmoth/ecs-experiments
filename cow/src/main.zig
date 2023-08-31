@@ -82,8 +82,8 @@ pub fn State(comptime Item: type) type {
     return struct {
         const Self = @This();
 
-        pub const max_items = 256;
-        pub const max_steps = 4;
+        pub const max_items = 1024;
+        pub const max_steps = 16;
         pub const RefCounted = MemoryPool(Item).RefCounted;
 
         alloc: std.mem.Allocator,
@@ -164,13 +164,25 @@ pub fn State(comptime Item: type) type {
         pub fn create(state: *Self) Handle {
             const handle = state.n_items;
             const rc = state.pool.create();
-            state.sparse[handle] = rc;
+            state.sparse[handle % max_items] = rc;
             return handle;
+        }
+
+        pub fn destroy(state: *Self, handle: Handle) void {
+            if (state.sparse[handle % max_items]) |rc| {
+                rc.count -= 1;
+                if (rc.count == 0) {
+                    state.pool.destroy(rc);
+                    state.sparse[handle % max_items] = null;
+                }
+            } else {
+                std.log.warn("called destroy with invalid handle {} (NOOP)", .{handle});
+            }
         }
 
         pub fn get(state: *Self, handle: Handle) ?*const Item {
             // note how COW means we shouldn't unconditionally return a pointer
-            if (state.sparse[handle]) |rc| {
+            if (state.sparse[handle % max_items]) |rc| {
                 return &rc.item;
             }
             return null;
@@ -178,20 +190,48 @@ pub fn State(comptime Item: type) type {
 
         pub fn set(state: *Self, handle: Handle, item: Item) void {
             // copy if refcount > 1, else just overwrite
-            if (state.sparse[handle]) |rc| {
+            if (state.sparse[handle % max_items]) |rc| {
                 std.debug.assert(rc.count > 0);
                 if (rc.count == 1) {
                     rc.item = item;
                 } else {
                     const newrc = state.pool.create();
                     newrc.item = item;
-                    state.sparse[handle] = newrc;
+                    state.sparse[handle % max_items] = newrc;
                     rc.count -= 1;
                 }
             } else {
                 std.log.warn("called set with invalid handle {} (NOOP)", .{handle});
             }
         }
+
+        pub const Iterator = struct {
+            sparse: [max_items]?*RefCounted,
+            cursor: usize,
+
+            /// captures the entities present when created, hence creating during iteration is safe, though they will be ignored
+            fn init(sparse: [max_items]?*RefCounted) Iterator {
+                return Iterator{
+                    .sparse = sparse,
+                    .cursor = 0,
+                };
+            }
+
+            /// NOTE the handles returned are not real, they're only the slot part but skips the generation
+            fn next(iter: *Iterator) ?Handle {
+                while (iter.cursor < iter.sparse.len and
+                    iter.sparse[iter.cursor] == null) : (iter.cursor += 1)
+                {}
+                if (iter.cursor < iter.sparse.len) {
+                    // const tmp = iter.sparse[iter.cursor].?;
+                    const tmp: Handle = @intCast(iter.cursor);
+                    iter.cursor += 1;
+                    return tmp;
+                } else {
+                    return null;
+                }
+            }
+        };
     };
 }
 
@@ -200,51 +240,106 @@ const _E = struct {
     hp: u8,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const alloc = gpa.allocator();
+pub fn benchmark(alloc: std.mem.Allocator) void {
+    var rng = std.rand.DefaultPrng.init(2701);
+    const N = State(_E).max_items;
 
     var pool = MemoryPool(_E).init(alloc);
     defer pool.deinit();
 
-    std.debug.print("{} {}\n", .{
-        @sizeOf(@TypeOf(pool).Node),
-        @alignOf(@TypeOf(pool).Node),
-    });
-
     var state = State(_E).init(alloc, &pool);
-    std.debug.print("{*}\n", .{state});
-    std.debug.print("{*}\n", .{state.prev});
-    std.debug.print("{*}\n", .{state.prev.?.prev});
 
-    var a = state.create();
-    std.debug.print("{*}\n", .{state.get(a)});
-    std.debug.print("{}\n", .{state.get(a).?.*});
-    state.set(a, _E{ .pos = @splat(1), .hp = 123 });
-    std.debug.print("{*}\n", .{state.get(a)});
-    std.debug.print("{}\n", .{state.get(a).?.*});
+    var n: usize = 0;
+    for (0..N / 2) |_| {
+        const e = state.create();
+        state.set(e, _E{ .pos = @splat(rng.random().float(f32)), .hp = rng.random().int(u8) });
+        n += 1;
+    }
 
-    state = state.step();
-    std.debug.print("{*}\n", .{state.get(a)});
-    std.debug.print("{}\n", .{state.get(a).?.*});
-    state.set(a, _E{ .pos = @splat(2), .hp = 234 });
-    std.debug.print("{*}\n", .{state.get(a)});
-    std.debug.print("{}\n", .{state.get(a).?.*});
-
-    var b = state.create();
-    for (0..50) |i| {
-        if ((i * i + i) % 3 == 0) {
-            state.set(a, _E{ .pos = @splat(@floatFromInt(i)), .hp = 234 });
+    for (0..10000) |_| {
+        if (rng.random().boolean()) {
+            if (rng.random().boolean() and n < N) {
+                // create
+                const e = state.create();
+                state.set(e, _E{ .pos = @splat(rng.random().float(f32)), .hp = rng.random().int(u8) });
+                n += 1;
+            } else if (n > 0) {
+                // destroy
+                while (true) {
+                    const handle: Handle = @intCast(rng.random().int(u10)); // ugly hack
+                    std.debug.print("YO {} {}\n", .{ n, handle });
+                    std.debug.print("{?}\n", .{state.get(handle)});
+                    if (state.get(handle) != null) {
+                        state.destroy(handle);
+                        n -= 1;
+                        break;
+                    }
+                }
+            }
+        } else {
+            // TODO abstract the iter construction better
+            var iter = State(_E).Iterator.init(state.sparse);
+            while (iter.next()) |handle| {
+                const e = state.get(handle).?;
+                state.set(handle, _E{
+                    .pos = e.pos * @as(@Vector(4, f32), @splat(rng.random().float(f32))),
+                    .hp = if (e.hp % 2 == 0) e.hp / 2 else e.hp *| 3 - 1,
+                });
+            }
+            state = state.step();
         }
-        if ((i) % 5 == 0) {
-            state.set(b, _E{ .pos = @splat(@floatFromInt(i)), .hp = 123 });
-        }
-        std.debug.print("{}\n", .{i});
-        state = state.step();
-        std.debug.print("{*}\n", .{state});
     }
 
     std.debug.print("total allocations {}\n", .{pool.total_allocations});
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const alloc = gpa.allocator();
+
+    benchmark(alloc);
+
+    // var pool = MemoryPool(_E).init(alloc);
+    // defer pool.deinit();
+
+    // std.debug.print("{} {}\n", .{
+    //     @sizeOf(@TypeOf(pool).Node),
+    //     @alignOf(@TypeOf(pool).Node),
+    // });
+
+    // var state = State(_E).init(alloc, &pool);
+    // std.debug.print("{*}\n", .{state});
+    // std.debug.print("{*}\n", .{state.prev});
+    // std.debug.print("{*}\n", .{state.prev.?.prev});
+
+    // var a = state.create();
+    // std.debug.print("{*}\n", .{state.get(a)});
+    // std.debug.print("{}\n", .{state.get(a).?.*});
+    // state.set(a, _E{ .pos = @splat(1), .hp = 123 });
+    // std.debug.print("{*}\n", .{state.get(a)});
+    // std.debug.print("{}\n", .{state.get(a).?.*});
+
+    // state = state.step();
+    // std.debug.print("{*}\n", .{state.get(a)});
+    // std.debug.print("{}\n", .{state.get(a).?.*});
+    // state.set(a, _E{ .pos = @splat(2), .hp = 234 });
+    // std.debug.print("{*}\n", .{state.get(a)});
+    // std.debug.print("{}\n", .{state.get(a).?.*});
+
+    // var b = state.create();
+    // for (0..50) |i| {
+    //     if ((i * i + i) % 3 == 0) {
+    //         state.set(a, _E{ .pos = @splat(@floatFromInt(i)), .hp = 234 });
+    //     }
+    //     if ((i) % 5 == 0) {
+    //         state.set(b, _E{ .pos = @splat(@floatFromInt(i)), .hp = 123 });
+    //     }
+    //     std.debug.print("{}\n", .{i});
+    //     state = state.step();
+    //     std.debug.print("{*}\n", .{state});
+    // }
+
+    // std.debug.print("total allocations {}\n", .{pool.total_allocations});
 }
 
 test "simple test" {}
