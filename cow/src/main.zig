@@ -52,11 +52,9 @@ pub fn MemoryPool(comptime Item: type) type {
 
         pub fn create(pool: *Self) *RefCounted {
             const node = if (pool.free_list) |item| blk: {
-                std.debug.print("reused\n", .{});
                 pool.free_list = item.next;
                 break :blk item;
             } else blk: {
-                std.debug.print("allocated\n", .{});
                 pool.total_allocations += 1;
                 break :blk pool.arena.allocator().create(Node) catch unreachable;
             };
@@ -67,7 +65,6 @@ pub fn MemoryPool(comptime Item: type) type {
 
         /// return an Item to the memorypool so it can be reused
         pub fn destroy(pool: *Self, ptr: *RefCounted) void {
-            std.debug.print("returned\n", .{});
             const node: *Node = @ptrCast(ptr);
 
             node.* = Node{ .next = pool.free_list };
@@ -91,7 +88,7 @@ pub fn State(comptime Item: type) type {
         prev: ?*Self,
 
         sparse: [max_items]?*RefCounted,
-        n_items: u32 = 0, // TODO properly reuse slots
+        n_items: u32, // TODO properly reuse slots
 
         pub fn init(alloc: std.mem.Allocator, pool: *MemoryPool(Item)) *Self {
             var prev = alloc.create(Self) catch unreachable;
@@ -100,6 +97,7 @@ pub fn State(comptime Item: type) type {
                 .pool = pool,
                 .prev = null,
                 .sparse = [_]?*RefCounted{null} ** max_items,
+                .n_items = 0,
             };
 
             var state = alloc.create(Self) catch unreachable;
@@ -108,8 +106,18 @@ pub fn State(comptime Item: type) type {
                 .pool = pool,
                 .prev = prev,
                 .sparse = [_]?*RefCounted{null} ** max_items,
+                .n_items = 0,
             };
             return state;
+        }
+
+        /// destroy the entire chain of states
+        pub fn deinit(state: *Self) void {
+            if (state.prev) |prev| {
+                prev.deinit();
+            }
+            state.alloc.destroy(state);
+            // we don't need to worry about reference counting, since we're destroying the whole world
         }
 
         /// state transition, sets current state as prev
@@ -121,6 +129,7 @@ pub fn State(comptime Item: type) type {
                 .pool = state.pool,
                 .prev = state,
                 .sparse = state.sparse,
+                .n_items = state.n_items,
             };
             for (0..max_items) |i| {
                 if (next.sparse[i] != null) {
@@ -140,13 +149,10 @@ pub fn State(comptime Item: type) type {
                     break;
                 }
             }
-            std.debug.print("j {}\n", .{j});
             if (j > max_steps) {
                 second.prev = null;
-                std.debug.print("YO\n", .{});
                 for (0..max_items) |i| {
                     if (first.sparse[i] != null) {
-                        std.debug.print("{}\n", .{first.sparse[i].?.*});
                         std.debug.assert(first.sparse[i].?.count > 0);
                         if (first.sparse[i].?.count == 1) {
                             state.pool.destroy(first.sparse[i].?);
@@ -163,6 +169,7 @@ pub fn State(comptime Item: type) type {
 
         pub fn create(state: *Self) Handle {
             const handle = state.n_items;
+            state.n_items += 1;
             const rc = state.pool.create();
             state.sparse[handle % max_items] = rc;
             return handle;
@@ -251,12 +258,15 @@ pub fn benchmark(alloc: std.mem.Allocator) void {
 
     var n: usize = 0;
     for (0..N / 2) |_| {
+        std.debug.print("n_items {}\n", .{state.n_items});
         const e = state.create();
         state.set(e, _E{ .pos = @splat(rng.random().float(f32)), .hp = rng.random().int(u8) });
         n += 1;
     }
 
     for (0..10000) |_| {
+        std.debug.print("{}\n", .{n});
+        std.debug.print("n_items {}\n", .{state.n_items});
         if (rng.random().boolean()) {
             if (rng.random().boolean() and n < N) {
                 // create
@@ -267,8 +277,6 @@ pub fn benchmark(alloc: std.mem.Allocator) void {
                 // destroy
                 while (true) {
                     const handle: Handle = @intCast(rng.random().int(u10)); // ugly hack
-                    std.debug.print("YO {} {}\n", .{ n, handle });
-                    std.debug.print("{?}\n", .{state.get(handle)});
                     if (state.get(handle) != null) {
                         state.destroy(handle);
                         n -= 1;
@@ -342,4 +350,25 @@ pub fn main() !void {
     // std.debug.print("total allocations {}\n", .{pool.total_allocations});
 }
 
-test "simple test" {}
+test "basic operations without step" {
+    var pool = MemoryPool(_E).init(std.testing.allocator);
+    defer pool.deinit();
+
+    var state = State(_E).init(std.testing.allocator, &pool);
+    defer state.deinit();
+
+    var a = state.create();
+    state.set(a, _E{ .pos = @splat(0), .hp = 123 });
+    try std.testing.expectEqual(state.get(a).?.hp, 123);
+
+    var b = state.create();
+    state.set(b, _E{ .pos = @splat(0), .hp = 234 });
+    try std.testing.expectEqual(state.get(b).?.hp, 234);
+
+    state.destroy(a);
+    try std.testing.expectEqual(state.get(a), null);
+    try std.testing.expectEqual(state.get(b).?.hp, 234);
+
+    state.destroy(b);
+    try std.testing.expectEqual(state.get(b), null);
+}
