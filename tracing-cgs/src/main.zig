@@ -7,6 +7,9 @@ fn getIndex(ptr: anytype, slice: []@TypeOf(ptr.*)) ?usize {
     if (b > a) {
         return null;
     }
+    // can @sizeOf be different from the spacing in an array?
+    // I don't think so, but doesn't hurt to make sure
+    std.debug.assert(@sizeOf(@TypeOf(ptr.*)) == @intFromPtr(&slice[1]) - @intFromPtr(&slice[0]));
     return (a - b) / @sizeOf(@TypeOf(ptr.*));
 }
 
@@ -64,6 +67,7 @@ pub fn MemoryPool(comptime Item: type) type {
         page_list: ?*Page = null,
 
         len: usize = 0,
+        peak: usize = 0,
         n_pages: usize = 0,
 
         pub fn init(alloc: std.mem.Allocator) Self {
@@ -110,6 +114,7 @@ pub fn MemoryPool(comptime Item: type) type {
             } else blk: {
                 const i = pool.len - (pool.n_pages - 1) * page_size;
                 pool.page_list.?.active[i] = true;
+                pool.peak += 1; // we're not reusing, so peak slot-use is increased
                 break :blk &pool.page_list.?.items[i];
             };
             pool.len += 1;
@@ -117,6 +122,10 @@ pub fn MemoryPool(comptime Item: type) type {
             node.* = Node{ .item = undefined };
             return @ptrCast(node);
         }
+
+        /// create an item that is placed at the end of the MemoryPool
+        /// useful if creating while iterating, guaranteeing that the newly created element is iterated over
+        // pub fn createAtEnd(pool: *Self) !*Item {}
 
         /// return an Item to the memorypool so it can be reused
         pub fn destroy(pool: *Self, ptr: *Item) void {
@@ -164,8 +173,14 @@ test "MemoryPool create & destroy" {
     const c = try pool.create();
     c.* = 345;
 
+    try std.testing.expectEqual(@as(usize, 3), pool.len);
+    try std.testing.expectEqual(@as(usize, 3), pool.peak);
+
     pool.destroy(b);
     pool.destroy(a);
+
+    try std.testing.expectEqual(@as(usize, 1), pool.len);
+    try std.testing.expectEqual(@as(usize, 3), pool.peak);
 
     try std.testing.expectEqual(a, try pool.create());
     try std.testing.expectEqual(b, try pool.create());
@@ -192,25 +207,9 @@ test "MemoryPool create & destroy" {
     // the slots should have been reused earlier on
     try std.testing.expect(c != try pool.create());
     try std.testing.expect(a != try pool.create());
-
-    // finally, randomly create and destroy stuff, to discover potential leaks or something
-    var fuzz = MemoryPool(@Vector(4, f32)).init(std.testing.allocator);
-    defer fuzz.deinit();
-    var rng = std.rand.DefaultPrng.init(2701);
-    for (0..123456) |_| {
-        var olditem: ?*@Vector(4, f32) = null;
-        if (fuzz.len == 0 or olditem == null or rng.random().float(f32) < 0.66) {
-            const x = try fuzz.create();
-            if (olditem == null or rng.random().float(f32) < 0.33) {
-                olditem = x;
-            }
-        } else {
-            fuzz.destroy(olditem.?);
-        }
-    }
 }
 
-test "MemoryPool iter" {
+test "MemoryPool iterator" {
     var pool = MemoryPool(i32).init(std.testing.allocator);
     defer pool.deinit();
 
@@ -235,18 +234,72 @@ test "MemoryPool iter" {
     }
 }
 
+test "MemoryPool randomized" {
+    // just do a bunch of operations randomly to test for unexpected memory errors or leaks
+    var pool = MemoryPool(@Vector(4, f32)).init(std.testing.allocator);
+    defer pool.deinit();
+
+    var iter = pool.iterator();
+    var rng = std.rand.DefaultPrng.init(2701);
+    for (0..1234567) |_| {
+        var olditem: ?*@Vector(4, f32) = null;
+        if (pool.len == 0 or olditem == null or rng.random().float(f32) < 0.5) {
+            const x = try pool.create();
+            x.* = @splat(0);
+            if (olditem == null or rng.random().float(f32) < 0.33) {
+                olditem = x;
+            }
+        } else if (rng.random().float(f32) < 0.5) {
+            pool.destroy(olditem.?);
+        } else {
+            iter = pool.iterator();
+            while (iter.next()) |x| {
+                x.* += @splat(1);
+            }
+        }
+    }
+}
+
+fn typeId(comptime T: type) u32 {
+    // simplified from prime31's zig-ecs https://github.com/prime31/zig-ecs/tree/master
+    const prime: u32 = 16777619;
+    var value: u32 = 2166136261;
+    for (@typeName(T)) |c| {
+        value = (value ^ @as(u32, @intCast(c))) *% prime;
+    }
+    return value;
+}
+
 pub const State = struct {
     alloc: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator, // pools live in the arena
     prev: ?*State,
 
-    pub fn init(alloc: std.mem.Allocator, n_states: usize) !*State {
-        _ = n_states;
+    pools: std.AutoHashMap(u32, usize),
+    remap: std.AutoHashMap(usize, usize),
 
+    pub fn init(alloc: std.mem.Allocator, n_states: usize) !*State {
         var state = try alloc.create(State);
         state.* = State{
             .alloc = alloc,
+            .arena = std.heap.ArenaAllocator.init(alloc),
             .prev = null,
+            .pools = std.AutoHashMap(u32, usize).init(alloc), // should this too live in the arena?
+            .remap = std.AutoHashMap(usize, usize).init(alloc),
         };
+
+        for (1..n_states) |_| {
+            const next = try alloc.create(State);
+            next.* = State{
+                .alloc = alloc,
+                .arena = std.heap.ArenaAllocator.init(alloc),
+                .prev = null,
+                .pools = std.AutoHashMap(u32, usize).init(alloc), // should this too live in the arena?
+                .remap = std.AutoHashMap(usize, usize).init(alloc),
+            };
+            next.prev = state;
+            state = next;
+        }
 
         return state;
     }
@@ -255,18 +308,193 @@ pub const State = struct {
         if (state.prev) |prev| {
             prev.deinit();
         }
+        state.remap.deinit();
+        state.pools.deinit();
+        state.arena.deinit(); // effectively deinits the pools
         state.alloc.destroy(state);
     }
 
-    pub fn step(state: *State) *State {
-        _ = state;
+    fn reinit(state: *State) void {
+        _ = state.arena.reset(.retain_capacity);
+        state.remap.clearRetainingCapacity();
+        state.pools.clearRetainingCapacity();
+    }
+
+    fn PtrType(comptime T: type) type {
+        const info = @typeInfo(T);
+        if (info == .Pointer) {
+            return info.Pointer.child;
+        } else {
+            return void;
+        }
+    }
+
+    /// test if a pointer points to a type that is in state.pools
+    fn isPoolPointer(state: *State, comptime T: type) bool {
+        const info = @typeInfo(T);
+        if (info == .Pointer) {
+            const id = typeId(info.Pointer.child);
+            return state.pools.contains(id);
+        }
+        return false;
+    }
+
+    fn isPointer(comptime T: type) bool {
+        const info = @typeInfo(T);
+        return info == .Pointer;
+    }
+
+    fn transfer(old_state: *State, new_state: *State, comptime T: type, item: *T) void {
+
+        // we can only transfer a type that is in the old_state
+        const info = @typeInfo(T);
+        const id = typeId(T);
+        if (!old_state.pools.contains(id)) {
+            return;
+        }
+
+        // if we have already copied this item, skip it
+        if (new_state.remap.contains(@intFromPtr(item))) {
+            return;
+        }
+
+        std.debug.print("transfer of type {s}\n", .{@typeName(T)});
+        std.debug.print("            item {}\n", .{item.*});
+        const pool = new_state.getPool(T);
+        const new = pool.create() catch unreachable;
+        new.* = item.*;
+        new_state.remap.put(@intFromPtr(item), @intFromPtr(new)) catch unreachable;
+
+        // if the type points to an item in old_state.pools
+        // then we should recursively transfer that too
+        switch (info) {
+            .Pointer => |pointer| {
+                old_state.transfer(new_state, pointer.child, item.*);
+            },
+            .Struct => |_struct| {
+                inline for (_struct.fields) |field| {
+                    const fieldinfo = @typeInfo(field.type);
+                    if (fieldinfo == .Pointer) {
+                        old_state.transfer(
+                            new_state,
+                            fieldinfo.Pointer.child,
+                            @field(item, field.name),
+                        );
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// transition to the next step in the k-tuple buffer
+    /// copies all components of anchor types and
+    /// any other components they reference to the new state
+    /// should be called on the most recent step
+    pub fn step(state: *State, anchors: anytype) *State {
+
+        // repurpose the oldest step as the new one
+        var next = state;
+        while (next.prev) |prev| {
+            if (prev.prev == null) {
+                next.prev = null;
+            }
+            next = prev;
+        }
+        std.debug.assert(next.prev == null);
+        next.reinit();
+        next.prev = state;
+
+        std.debug.assert(next != state);
+
+        inline for (anchors) |anchor| {
+            std.debug.print("{s}\n", .{@typeName(anchor)});
+            const old_pool = state.getPool(anchor);
+            var iter = old_pool.iterator();
+            while (iter.next()) |item| {
+                transfer(state, next, anchor, item);
+            }
+        }
+
+        return next;
+    }
+
+    /// fetches the MemoryPool for type T if it exits
+    /// or creates it if it doesn't
+    pub fn getPool(state: *State, comptime T: type) *MemoryPool(T) {
+        const id = comptime typeId(T);
+
+        if (state.pools.get(id)) |v| {
+            return @ptrFromInt(v);
+        }
+
+        // error handling?
+        var pool = state.arena.allocator().create(MemoryPool(T)) catch unreachable;
+        pool.* = MemoryPool(T).init(state.arena.allocator());
+        state.pools.put(id, @intFromPtr(pool)) catch unreachable;
+        return pool;
     }
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const alloc = gpa.allocator();
+const A = struct { x: u32, y: f32 };
+const B = struct { a: *A, n: u32 };
+const C = struct {
+    n: u128,
+    b: *B,
+};
 
-    var state = try State.init(alloc, 2);
+test "State create & destroy" {
+    var state = try State.init(std.testing.allocator, 2);
     defer state.deinit();
+
+    std.debug.print("{s}\t{}\n", .{ @typeName(u32), typeId(u32) });
+    std.debug.print("{s}\t{}\n", .{ @typeName(f32), typeId(f32) });
+    std.debug.print("{s}\t{}\n", .{ @typeName(*f32), typeId(*f32) });
+
+    const pool_u32 = state.getPool(u32);
+    const pool_f32 = state.getPool(f32);
+    const pool_f32ptr = state.getPool(*f32);
+
+    {
+        const a = try pool_u32.create();
+        a.* = 123;
+
+        const b = try pool_f32.create();
+        b.* = 2.34;
+        const c = try pool_f32.create();
+        c.* = 3.45;
+
+        const d = try pool_f32ptr.create();
+        d.* = b;
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), state.getPool(u32).len);
+
+    state = state.step(.{ u32, *f32 });
+
+    try std.testing.expectEqual(@as(usize, 1), state.getPool(f32).len);
+
+    const pool_A = state.getPool(A);
+    const pool_B = state.getPool(B);
+    const pool_C = state.getPool(C);
+
+    {
+        const a = try pool_A.create();
+        a.* = .{ .x = 2, .y = 0.5 };
+
+        const a2 = try pool_A.create();
+        a2.* = .{ .x = 33, .y = 33.3 };
+
+        const b = try pool_B.create();
+        b.* = .{ .a = a, .n = 123 };
+
+        const c = try pool_C.create();
+        c.* = .{ .n = 0, .b = b };
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), state.getPool(A).len);
+
+    state = state.step(.{C});
+
+    try std.testing.expectEqual(@as(usize, 1), state.getPool(A).len);
 }
