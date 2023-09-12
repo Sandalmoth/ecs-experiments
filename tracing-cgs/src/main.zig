@@ -278,6 +278,7 @@ pub const State = struct {
     pools: std.AutoHashMap(u32, usize),
     remap: std.AutoHashMap(usize, usize),
 
+    /// init the k-tuple buffer of gamestates
     pub fn init(alloc: std.mem.Allocator, n_states: usize) !*State {
         var state = try alloc.create(State);
         state.* = State{
@@ -320,30 +321,6 @@ pub const State = struct {
         state.pools.clearRetainingCapacity();
     }
 
-    fn PtrType(comptime T: type) type {
-        const info = @typeInfo(T);
-        if (info == .Pointer) {
-            return info.Pointer.child;
-        } else {
-            return void;
-        }
-    }
-
-    /// test if a pointer points to a type that is in state.pools
-    fn isPoolPointer(state: *State, comptime T: type) bool {
-        const info = @typeInfo(T);
-        if (info == .Pointer) {
-            const id = typeId(info.Pointer.child);
-            return state.pools.contains(id);
-        }
-        return false;
-    }
-
-    fn isPointer(comptime T: type) bool {
-        const info = @typeInfo(T);
-        return info == .Pointer;
-    }
-
     fn transfer(old_state: *State, new_state: *State, comptime T: type, item: *T) void {
 
         // we can only transfer a type that is in the old_state
@@ -358,8 +335,9 @@ pub const State = struct {
             return;
         }
 
-        std.debug.print("transfer of type {s}\n", .{@typeName(T)});
-        std.debug.print("            item {}\n", .{item.*});
+        // std.debug.print("transfer of type {s}\n", .{@typeName(T)});
+        // std.debug.print("            item {}\n", .{item.*});
+
         const pool = new_state.getPool(T);
         const new = pool.create() catch unreachable;
         new.* = item.*;
@@ -408,7 +386,6 @@ pub const State = struct {
         std.debug.assert(next != state);
 
         inline for (anchors) |anchor| {
-            std.debug.print("{s}\n", .{@typeName(anchor)});
             const old_pool = state.getPool(anchor);
             var iter = old_pool.iterator();
             while (iter.next()) |item| {
@@ -417,6 +394,13 @@ pub const State = struct {
         }
 
         return next;
+    }
+
+    /// reset the gamestate to the k-th state from the head
+    pub fn rebase(state: *State, k: usize) *State {
+        _ = state;
+        _ = k;
+        @compileError("rebase not yet implemented");
     }
 
     /// fetches the MemoryPool for type T if it exits
@@ -434,37 +418,41 @@ pub const State = struct {
         state.pools.put(id, @intFromPtr(pool)) catch unreachable;
         return pool;
     }
+
+    pub fn create(state: *State, comptime T: type) *T {
+        const pool = state.getPool(T);
+        return pool.create() catch unreachable;
+    }
+
+    pub fn destroy(state: *State, comptime T: type, item: *T) void {
+        const pool = state.getPool(T);
+        pool.destroy(item);
+    }
+
+    pub fn iterator(state: *State, comptime T: type) MemoryPool(T).Iterator {
+        const pool = state.getPool(T);
+        return pool.iterator();
+    }
 };
 
 const A = struct { x: u32, y: f32 };
 const B = struct { a: *A, n: u32 };
-const C = struct {
-    n: u128,
-    b: *B,
-};
+const C = struct { n: u128, b: *B };
 
 test "State create & destroy" {
     var state = try State.init(std.testing.allocator, 2);
     defer state.deinit();
 
-    std.debug.print("{s}\t{}\n", .{ @typeName(u32), typeId(u32) });
-    std.debug.print("{s}\t{}\n", .{ @typeName(f32), typeId(f32) });
-    std.debug.print("{s}\t{}\n", .{ @typeName(*f32), typeId(*f32) });
-
-    const pool_u32 = state.getPool(u32);
-    const pool_f32 = state.getPool(f32);
-    const pool_f32ptr = state.getPool(*f32);
-
     {
-        const a = try pool_u32.create();
+        const a = state.create(u32);
         a.* = 123;
 
-        const b = try pool_f32.create();
+        const b = state.create(f32);
         b.* = 2.34;
-        const c = try pool_f32.create();
+        const c = state.create(f32);
         c.* = 3.45;
 
-        const d = try pool_f32ptr.create();
+        const d = state.create(*f32);
         d.* = b;
     }
 
@@ -474,6 +462,7 @@ test "State create & destroy" {
 
     try std.testing.expectEqual(@as(usize, 1), state.getPool(f32).len);
 
+    // it's also possible to create by going through the pool
     const pool_A = state.getPool(A);
     const pool_B = state.getPool(B);
     const pool_C = state.getPool(C);
@@ -497,4 +486,22 @@ test "State create & destroy" {
     state = state.step(.{C});
 
     try std.testing.expectEqual(@as(usize, 1), state.getPool(A).len);
+    try std.testing.expectEqual(@as(usize, 1), state.getPool(B).len);
+    try std.testing.expectEqual(@as(usize, 1), state.getPool(C).len);
+    try std.testing.expectEqual(@as(usize, 0), state.getPool(u32).len);
+    try std.testing.expectEqual(@as(usize, 0), state.getPool(f32).len);
+    try std.testing.expectEqual(@as(usize, 0), state.getPool(*f32).len);
+
+    {
+        const a = state.create(u32);
+        a.* = 1;
+        const b = state.create(u32);
+        b.* = 1;
+
+        var iter = state.iterator(u32);
+        try std.testing.expectEqual(a.*, iter.next().?.*);
+        try std.testing.expectEqual(b.*, iter.next().?.*);
+    }
+
+    state = state.step(.{});
 }
