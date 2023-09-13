@@ -5,8 +5,8 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{
-        .name = "tracing-cgs",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .name = "benchmark",
+        .root_source_file = .{ .path = "src/benchmark.zig" },
         .target = target,
         .optimize = optimize,
     });

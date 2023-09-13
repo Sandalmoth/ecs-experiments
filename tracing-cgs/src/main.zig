@@ -187,7 +187,9 @@ pub fn MemoryPool(comptime Item: type) type {
         /// return an Item to the memorypool so it can be reused
         /// if the item does not point to an active item in the pool, this function does nothing
         pub fn destroy(pool: *Self, ptr: *Item) void {
-            // TODO make safe if ptr is invalid (in any way like pool is empty or handle is old, etc)
+            if (pool.page_list == null) {
+                return;
+            }
 
             const node: *Node = @alignCast(@ptrCast(ptr));
 
@@ -490,18 +492,19 @@ pub const State = struct {
         state.pools.clearRetainingCapacity();
     }
 
-    fn transfer(old_state: *State, new_state: *State, comptime T: type, item: *T) void {
+    /// returns a pointer to the element in the new state
+    fn transfer(old_state: *State, new_state: *State, comptime T: type, item: *T) *T {
 
         // we can only transfer a type that is in the old_state
         const info = @typeInfo(T);
         const id = typeId(T);
         if (!old_state.pools.contains(id)) {
-            return;
+            std.debug.panic("Tried to transfer a reference to a component that doesn't exist {s}", .{@typeName(T)});
         }
 
         // if we have already copied this item, skip it
         if (new_state.remap.contains(@intFromPtr(item))) {
-            return;
+            return @ptrFromInt(new_state.remap.get(@intFromPtr(item)).?);
         }
 
         // std.debug.print("transfer of type {s}\n", .{@typeName(T)});
@@ -510,19 +513,22 @@ pub const State = struct {
         const pool = new_state.getPool(T);
         const new = pool.create() catch unreachable;
         new.* = item.*;
+
+        // NOTE we spend like 25% of the runtime on this call
         new_state.remap.put(@intFromPtr(item), @intFromPtr(new)) catch unreachable;
 
         // if the type points to an item in old_state.pools
         // then we should recursively transfer that too
         switch (info) {
             .Pointer => |pointer| {
-                old_state.transfer(new_state, pointer.child, item.*);
+                // pointers should not be their old value, but rather updatet to the new location
+                new.* = old_state.transfer(new_state, pointer.child, item.*);
             },
             .Struct => |_struct| {
                 inline for (_struct.fields) |field| {
                     const fieldinfo = @typeInfo(field.type);
                     if (fieldinfo == .Pointer) {
-                        old_state.transfer(
+                        @field(new, field.name) = old_state.transfer(
                             new_state,
                             fieldinfo.Pointer.child,
                             @field(item, field.name),
@@ -532,6 +538,8 @@ pub const State = struct {
             },
             else => {},
         }
+
+        return new;
     }
 
     /// transition to the next step in the k-tuple buffer
@@ -558,11 +566,18 @@ pub const State = struct {
             const old_pool = state.getPool(anchor);
             var iter = old_pool.iterator();
             while (iter.next()) |item| {
-                transfer(state, next, anchor, item);
+                _ = transfer(state, next, anchor, item);
             }
         }
 
         return next;
+    }
+
+    pub fn update(state: *State, ptr: anytype) !@TypeOf(ptr) {
+        if (state.remap.get(@intFromPtr(ptr))) |new| {
+            return @ptrFromInt(new);
+        }
+        return error.NotFound;
     }
 
     /// reset the gamestate to the k-th state from the head
@@ -678,4 +693,98 @@ test "State create, destroy, & step" {
     }
 
     state = state.step(.{});
+}
+
+test "State multiple references" {
+    // multiple references to an item should not result in it being duplicated
+    // also test repeated use of long state chains
+    var state = try State.init(std.testing.allocator, 16);
+    defer state.deinit();
+
+    var a = state.create(u32);
+    a.* = 123;
+
+    {
+        const b = state.create(*u32);
+        b.* = a;
+
+        const c = state.create(*u32);
+        c.* = a;
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), state.getPool(u32).len);
+    try std.testing.expectEqual(@as(usize, 2), state.getPool(*u32).len);
+
+    {
+        var iter = state.iterator(*u32);
+        while (iter.next()) |item| {
+            std.debug.print("{*}\n", .{item.*});
+        }
+    }
+
+    state = state.step(.{*u32});
+    a = try state.update(a);
+
+    {
+        var iter = state.iterator(*u32);
+        while (iter.next()) |item| {
+            std.debug.print("{*}\n", .{item.*});
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), state.getPool(u32).len);
+    try std.testing.expectEqual(@as(usize, 2), state.getPool(*u32).len);
+
+    for (3..234) |i| {
+        const d = state.create(*u32);
+        d.* = a;
+        try std.testing.expectEqual(@as(usize, 1), state.getPool(u32).len);
+        try std.testing.expectEqual(@as(usize, i), state.getPool(*u32).len);
+
+        state = state.step(.{*u32});
+        a = try state.update(a);
+    }
+}
+
+const D = struct { n: usize, parent: ?*D };
+
+test "State multiple references 2" {
+    var state = try State.init(std.testing.allocator, 2);
+    defer state.deinit();
+
+    var root = state.create(D);
+    root.* = .{ .n = 0, .parent = null };
+
+    { // tree
+        var a = state.create(D);
+        a.* = .{ .n = 0, .parent = root };
+        var b = state.create(D);
+        b.* = .{ .n = 0, .parent = root };
+
+        var c = state.create(D);
+        c.* = .{ .n = 0, .parent = a };
+        var d = state.create(D);
+        d.* = .{ .n = 0, .parent = a };
+
+        var e = state.create(D);
+        e.* = .{ .n = 0, .parent = b };
+        var f = state.create(D);
+        f.* = .{ .n = 0, .parent = b };
+    }
+
+    { // cycle
+        var c0 = state.create(D);
+        var c1 = state.create(D);
+        var c2 = state.create(D);
+        c0.* = .{ .n = 0, .parent = c2 };
+        c1.* = .{ .n = 0, .parent = c0 };
+        c2.* = .{ .n = 0, .parent = c1 };
+    }
+
+    try std.testing.expectEqual(@as(usize, 10), state.getPool(D).len);
+
+    for (0..32) |_| {
+        state = state.step(.{D});
+        try std.testing.expectEqual(@as(usize, 10), state.getPool(D).len);
+    }
 }
