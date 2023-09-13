@@ -1,5 +1,15 @@
 const std = @import("std");
 
+// Thoughts:
+// Is the MemoryPool free_list unneccessary in the context of the State chain?
+// Since we only use a pool transiently (then transitioning state)
+// we might be more performant leaking memory
+// since otherwise, create & destroy comes at the cost of finding
+// and deactivating the item slot in the right page.
+// We could:
+// - remove the free list, just leak memory and reclaim with State.step
+// - store a .{next: ?*Node, .slot: *bool} in the node (doubles the size though) to make create faster
+
 fn getIndex(ptr: anytype, slice: []@TypeOf(ptr.*)) ?usize {
     // based on https://github.com/FlorenceOS/Florence/blob/master/lib/util/pointers.zig
     const a = @intFromPtr(ptr);
@@ -15,7 +25,7 @@ fn getIndex(ptr: anytype, slice: []@TypeOf(ptr.*)) ?usize {
 
 pub fn MemoryPool(comptime Item: type) type {
     // this is loosely based on std.heap.MemoryPool
-    // however, I think this union-based implementation fixes some issues with the std version
+    // however, I think this union-based implementation fixes some issues with the std version (alignment related)
     // additionally, the paging allows us to (relatively) efficiently iterate across all items
     // though this supports running on a general allocator, it probably makes sense to use with an arena
 
@@ -286,12 +296,10 @@ test "MemoryPool create & destroy 2" {
 
     var i: u32 = 0;
     var iter = pool.iterator();
-    std.debug.print("\n", .{});
     while (iter.next()) |item| {
-        std.debug.print("{} ", .{item.*});
+        _ = item;
         i += 1;
     }
-    std.debug.print("\n", .{});
 
     try std.testing.expectEqual(@as(u32, 2), i);
 
@@ -304,10 +312,9 @@ test "MemoryPool create & destroy 2" {
     i = 0;
     iter = pool.iterator();
     while (iter.next()) |item| {
-        std.debug.print("{} ", .{item.*});
+        _ = item;
         i += 1;
     }
-    std.debug.print("\n", .{});
 
     try std.testing.expectEqual(@as(u32, 3), i);
 }
