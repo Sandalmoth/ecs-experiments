@@ -516,6 +516,11 @@ pub const State = struct {
         return pool.create() catch unreachable;
     }
 
+    pub fn createAtEnd(state: *State, comptime T: type) *T {
+        const pool = state.getPool(T);
+        return pool.createAtEnd() catch unreachable;
+    }
+
     pub fn destroy(state: *State, comptime T: type, item: *T) void {
         const pool = state.getPool(T);
         pool.destroy(item);
@@ -531,7 +536,7 @@ const A = struct { x: u32, y: f32 };
 const B = struct { a: *A, n: u32 };
 const C = struct { n: u128, b: *B };
 
-test "State create & destroy" {
+test "State create, destroy, & step" {
     var state = try State.init(std.testing.allocator, 2);
     defer state.deinit();
 
