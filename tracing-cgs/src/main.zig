@@ -65,6 +65,7 @@ pub fn MemoryPool(comptime Item: type) type {
 
         free_list: ?*Node = null,
         page_list: ?*Page = null,
+        last_page: ?*Page = null, // so that we can add pages to the end instead of beginning
 
         len: usize = 0,
         peak: usize = 0,
@@ -97,11 +98,16 @@ pub fn MemoryPool(comptime Item: type) type {
             if (pool.len == page_size * pool.n_pages) {
                 var page = try pool.alloc.create(Page);
                 page.* = Page{
-                    .next = pool.page_list,
+                    .next = null,
                     .items = undefined,
                     .active = [_]bool{false} ** page_size,
                 };
-                pool.page_list = page;
+                if (pool.n_pages == 0) {
+                    pool.page_list = page;
+                } else {
+                    pool.last_page.?.next = page;
+                }
+                pool.last_page = page;
                 pool.n_pages += 1;
             }
 
@@ -113,9 +119,9 @@ pub fn MemoryPool(comptime Item: type) type {
                 break :blk item;
             } else blk: {
                 const i = pool.len - (pool.n_pages - 1) * page_size;
-                pool.page_list.?.active[i] = true;
+                pool.last_page.?.active[i] = true;
                 pool.peak += 1; // we're not reusing, so peak slot-use is increased
-                break :blk &pool.page_list.?.items[i];
+                break :blk &pool.last_page.?.items[i];
             };
             pool.len += 1;
 
@@ -124,8 +130,36 @@ pub fn MemoryPool(comptime Item: type) type {
         }
 
         /// create an item that is placed at the end of the MemoryPool
-        /// useful if creating while iterating, guaranteeing that the newly created element is iterated over
-        // pub fn createAtEnd(pool: *Self) !*Item {}
+        /// useful if creating while iterating, ensuring that the newly created element is iterated over
+        pub fn createAtEnd(pool: *Self) !*Item {
+            std.debug.assert(pool.peak <= page_size * pool.n_pages); // NOTE peak instead of len
+            if (pool.peak == page_size * pool.n_pages) { // NOTE peak instead of len
+                var page = try pool.alloc.create(Page);
+                page.* = Page{
+                    .next = null,
+                    .items = undefined,
+                    .active = [_]bool{false} ** page_size,
+                };
+                if (pool.n_pages == 0) {
+                    pool.page_list = page;
+                } else {
+                    pool.last_page.?.next = page;
+                }
+                pool.last_page = page;
+                pool.n_pages += 1;
+            }
+
+            const node = blk: {
+                const i = pool.peak - (pool.n_pages - 1) * page_size; // NOTE use of peak instead of len
+                pool.last_page.?.active[i] = true;
+                pool.peak += 1; // we're not reusing, so peak slot-use is increased
+                break :blk &pool.last_page.?.items[i];
+            };
+            pool.len += 1;
+
+            node.* = Node{ .item = undefined };
+            return @ptrCast(node);
+        }
 
         /// return an Item to the memorypool so it can be reused
         pub fn destroy(pool: *Self, ptr: *Item) void {
@@ -232,6 +266,64 @@ test "MemoryPool iterator" {
         try std.testing.expectEqual(i * i, x.*);
         i += 1;
     }
+}
+
+const F = struct {
+    n: u128,
+    prev: ?*F,
+};
+
+test "MemoryPool fib" {
+    var pool = MemoryPool(F).init(std.testing.allocator);
+    defer pool.deinit();
+
+    const N = 129;
+
+    {
+        const a = try pool.create();
+        a.* = .{ .n = 0, .prev = null };
+        const b = try pool.create();
+        b.* = .{ .n = 1, .prev = a };
+    }
+
+    // create new terms of the fibonacci series by creating while iterating
+    {
+        var iter = pool.iterator();
+        var i: usize = 2;
+        while (iter.next()) |item| {
+            if (i == 2) {
+                i += 1;
+                continue;
+            }
+
+            // if replaced with pool.create() this fails
+            // since the iteration will stop prematurely
+            // as we'd add an element to a slot we've already iterated past
+            const a = try pool.createAtEnd();
+            a.* = .{ .n = item.n + item.prev.?.n, .prev = item };
+
+            i += 1;
+            if (i > N) {
+                break;
+            }
+
+            // we can return some old item to the pool
+            // without affecting the result, since the memory slot will not be reused
+            if (i == 42) {
+                pool.destroy(a.prev.?.prev.?.prev.?.prev.?);
+            }
+        }
+    }
+
+    var last_number: u128 = 1337; // not a fibonacci number
+    {
+        var iter = pool.iterator();
+        while (iter.next()) |item| {
+            last_number = item.n;
+        }
+    }
+
+    try std.testing.expectEqual(@as(u128, 251728825683549488150424261), last_number);
 }
 
 test "MemoryPool randomized" {
