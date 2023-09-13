@@ -116,6 +116,19 @@ pub fn MemoryPool(comptime Item: type) type {
 
             const node = if (pool.free_list) |item| blk: {
                 pool.free_list = item.next;
+
+                var page = pool.page_list.?;
+                var slot: usize = blk2: {
+                    while (true) {
+                        const slot = getIndex(item, &page.items);
+                        if (slot != null and slot.? < page_size) {
+                            break :blk2 slot.?;
+                        }
+                        page = page.next.?; // is never null; items in free_list are in a page by definition
+                    }
+                };
+                page.active[slot] = true;
+
                 break :blk item;
             } else blk: {
                 const i = pool.len - (pool.n_pages - 1) * page_size;
@@ -162,6 +175,7 @@ pub fn MemoryPool(comptime Item: type) type {
         }
 
         /// return an Item to the memorypool so it can be reused
+        /// if the item does not point to an active item in the pool, this function does nothing
         pub fn destroy(pool: *Self, ptr: *Item) void {
             // TODO make safe if ptr is invalid (in any way like pool is empty or handle is old, etc)
 
@@ -175,12 +189,21 @@ pub fn MemoryPool(comptime Item: type) type {
                     if (slot != null and slot.? < page_size) {
                         break :blk slot.?;
                     }
+                    if (page.next == null) {
+                        // item not found in any of the pages (NOOP)
+                        return;
+                    }
                     page = page.next.?;
                 }
             };
+            if (!page.active[slot]) {
+                // item is already inactive (NOOP)
+                return;
+            }
             page.active[slot] = false; // all that for this...
             pool.len -= 1;
 
+            // we keep a linked list of empty slots to be reused
             node.* = Node{ .next = pool.free_list };
             pool.free_list = node;
         }
@@ -243,6 +266,52 @@ test "MemoryPool create & destroy" {
     try std.testing.expect(a != try pool.create());
 }
 
+test "MemoryPool create & destroy 2" {
+    var pool = MemoryPool(i32).init(std.testing.allocator);
+    defer pool.deinit();
+
+    const a = try pool.create();
+    a.* = 123;
+
+    const b = try pool.create();
+    b.* = 234;
+
+    const c = try pool.create();
+    c.* = 345;
+
+    pool.destroy(b);
+
+    try std.testing.expectEqual(@as(usize, 2), pool.len);
+    try std.testing.expectEqual(@as(usize, 3), pool.peak);
+
+    var i: u32 = 0;
+    var iter = pool.iterator();
+    std.debug.print("\n", .{});
+    while (iter.next()) |item| {
+        std.debug.print("{} ", .{item.*});
+        i += 1;
+    }
+    std.debug.print("\n", .{});
+
+    try std.testing.expectEqual(@as(u32, 2), i);
+
+    const d = try pool.create();
+    d.* = 456;
+
+    try std.testing.expectEqual(@as(usize, 3), pool.len);
+    try std.testing.expectEqual(@as(usize, 3), pool.peak);
+
+    i = 0;
+    iter = pool.iterator();
+    while (iter.next()) |item| {
+        std.debug.print("{} ", .{item.*});
+        i += 1;
+    }
+    std.debug.print("\n", .{});
+
+    try std.testing.expectEqual(@as(u32, 3), i);
+}
+
 test "MemoryPool iterator" {
     var pool = MemoryPool(i32).init(std.testing.allocator);
     defer pool.deinit();
@@ -297,6 +366,7 @@ test "MemoryPool fib" {
             }
 
             // if replaced with pool.create() this fails
+            // (because of the destroy call at i==42 below)
             // since the iteration will stop prematurely
             // as we'd add an element to a slot we've already iterated past
             const a = try pool.createAtEnd();
