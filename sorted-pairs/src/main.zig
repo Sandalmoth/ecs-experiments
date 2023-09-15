@@ -125,10 +125,19 @@ pub fn Table(comptime T: type) type {
         const Self = @This();
 
         alloc: std.mem.Allocator,
+
         entities: []Entity,
         components: []T,
         len: usize,
-        futurelen: usize,
+
+        // these are merged when we call update
+        future_entities: []Entity,
+        future_components: []T,
+        future_len: usize,
+
+        // these are destroyed when we call update
+        // future_nonentities: []Entity,
+        // future_nonentity_len: usize,
 
         pub fn init(alloc: std.mem.Allocator) Self {
             return Self{
@@ -136,7 +145,9 @@ pub fn Table(comptime T: type) type {
                 .entities = &.{}, // why is this the syntax for an empty slice?
                 .components = &.{},
                 .len = 0,
-                .futurelen = 0,
+                .future_entities = &.{},
+                .future_components = &.{},
+                .future_len = 0,
             };
         }
 
@@ -148,12 +159,25 @@ pub fn Table(comptime T: type) type {
         }
 
         pub fn update(table: *Self) void {
-            table.len = table.futurelen;
-            // TODO sort (entity, component) pairs
-            // arXiv:2112.11112
-            // 743745, 331490, 147748, 65853, 29351, 13082, 5831, 2599, 1158, 512, 230, 102, 45, 20, 9, 4, 1
-            const gaps = [_]usize{ 102, 45, 20, 9, 4, 1 };
-            for (gaps) |gap| {
+            std.debug.assert(table.entities.len == table.components.len);
+            // if we are out of memory, allocate more
+            if (table.len + table.future_len > table.entities.len) {
+                expandToMin(table.alloc, &table.entities, &table.components, table.len + table.future_len);
+            }
+            std.mem.copy(Entity, table.entities[table.len..], table.future_entities[0..table.future_len]);
+            std.mem.copy(T, table.components[table.len..], table.future_components[0..table.future_len]);
+            table.len += table.future_len;
+
+            if (table.len < 2) {
+                return; // sorted by default
+            }
+
+            // the best known shell sort gap sequence according to arXiv:2112.11112
+            const gaps = [_]usize{ 743745, 331490, 147748, 65853, 29351, 13082, 5831, 2599, 1158, 512, 230, 102, 45, 20, 9, 4, 1 };
+            var first_gap: usize = 0;
+            while (gaps[first_gap] > table.len) : (first_gap += 1) {}
+
+            for (gaps[first_gap..]) |gap| {
                 var i: usize = gap;
                 while (i < table.len) : (i += 1) {
                     var j: usize = i;
@@ -173,6 +197,7 @@ pub fn Table(comptime T: type) type {
         /// get the index where an entity resides
         pub fn find(table: Self, entity: Entity) ?usize {
             std.debug.assert(table.entities.len == table.components.len);
+            // TODO add a cache?
             return std.sort.binarySearch(Entity, entity, table.entities[0..table.len], {}, order_entity);
         }
 
@@ -189,25 +214,35 @@ pub fn Table(comptime T: type) type {
             return table.components[ix];
         }
 
+        fn expandToMin(alloc: std.mem.Allocator, entities: *[]Entity, components: *[]T, min_size: usize) void {
+            std.debug.assert(entities.*.len == components.*.len);
+            const new_len: usize = @max(@max(16, 2 * entities.*.len), std.math.ceilPowerOfTwoAssert(usize, min_size));
+            var new_entities = alloc.alloc(Entity, new_len) catch @panic("out of memory");
+            var new_components = alloc.alloc(T, new_len) catch @panic("out of memory");
+            std.mem.copy(Entity, new_entities, entities.*);
+            std.mem.copy(T, new_components, components.*);
+            alloc.free(entities.*);
+            alloc.free(components.*);
+            entities.* = new_entities;
+            components.* = new_components;
+        }
+
+        inline fn expand(alloc: std.mem.Allocator, entities: *[]Entity, components: *[]T) void {
+            expandToMin(alloc, entities, components, entities.len + 1);
+        }
+
         pub fn add(table: *Self, entity: Entity, value: T) !void {
+            // but like: how do we know that we haven't already queued this up for creation?
+            // we could maintain a sorted future_components and then do a merge during update, instead of a sort?
             const ix = table.find(entity) orelse {
                 // if we are out of memory, allocate more
-                if (table.futurelen >= table.entities.len) {
-                    // TODO make memory safe if alloc fails
-                    const new_len: usize = @max(4, 2 * table.entities.len);
-                    var new_entities = try table.alloc.alloc(Entity, new_len);
-                    var new_components = try table.alloc.alloc(T, new_len);
-                    std.mem.copy(Entity, new_entities, table.entities);
-                    std.mem.copy(T, new_components, table.components);
-                    table.alloc.free(table.entities);
-                    table.alloc.free(table.components);
-                    table.entities = new_entities;
-                    table.components = new_components;
+                if (table.future_len >= table.future_components.len) {
+                    expand(table.alloc, &table.future_entities, &table.future_components);
                 }
 
-                table.entities[table.futurelen] = entity;
-                table.components[table.futurelen] = value;
-                table.futurelen += 1;
+                table.future_entities[table.future_len] = entity;
+                table.future_components[table.future_len] = value;
+                table.future_len += 1;
                 return;
             };
             _ = ix;
