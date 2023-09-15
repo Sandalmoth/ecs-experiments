@@ -5,6 +5,10 @@ fn order_entity(context: void, lhs: Entity, rhs: Entity) std.math.Order {
     _ = context;
     return std.math.order(lhs, rhs);
 }
+fn less_than_entity(context: void, lhs: Entity, rhs: Entity) bool {
+    _ = context;
+    return lhs < rhs;
+}
 
 pub fn Context(comptime T: type) type {
     std.debug.assert(@sizeOf(usize) == @sizeOf(*Table(u32)));
@@ -136,8 +140,8 @@ pub fn Table(comptime T: type) type {
         future_len: usize,
 
         // these are destroyed when we call update
-        // future_nonentities: []Entity,
-        // future_nonentity_len: usize,
+        future_nonentities: []Entity,
+        future_nonlen: usize,
 
         pub fn init(alloc: std.mem.Allocator) Self {
             return Self{
@@ -148,6 +152,8 @@ pub fn Table(comptime T: type) type {
                 .future_entities = &.{},
                 .future_components = &.{},
                 .future_len = 0,
+                .future_nonentities = &.{},
+                .future_nonlen = 0,
             };
         }
 
@@ -166,32 +172,37 @@ pub fn Table(comptime T: type) type {
             }
             std.mem.copy(Entity, table.entities[table.len..], table.future_entities[0..table.future_len]);
             std.mem.copy(T, table.components[table.len..], table.future_components[0..table.future_len]);
+
+            // merge the future into the past
+            // i think this is a linear time algorithm, but not sure
+            var len = table.len;
             table.len += table.future_len;
 
-            if (table.len < 2) {
-                return; // sorted by default
-            }
-
-            // the best known shell sort gap sequence according to arXiv:2112.11112
-            const gaps = [_]usize{ 743745, 331490, 147748, 65853, 29351, 13082, 5831, 2599, 1158, 512, 230, 102, 45, 20, 9, 4, 1 };
-            var first_gap: usize = 0;
-            while (gaps[first_gap] > table.len) : (first_gap += 1) {}
-
-            for (gaps[first_gap..]) |gap| {
-                var i: usize = gap;
-                while (i < table.len) : (i += 1) {
-                    var j: usize = i;
+            var i: usize = 0;
+            var j: usize = 0;
+            while (i < table.len) {
+                if (i == len) {
+                    table.entities[i] = table.entities[j];
+                    table.components[i] = table.components[j];
+                    j += 1;
+                    len += 1;
+                }
+                if (table.entities[i] < table.entities[j]) {
+                    i += 1;
+                } else {
                     const tmp1 = table.entities[i];
+                    table.entities[i] = table.entities[j];
+                    table.entities[i] = tmp1;
                     const tmp2 = table.components[i];
-                    while (j >= gap and table.entities[j - gap] > tmp1) : (j -= gap) {
-                        table.entities[j] = table.entities[j - gap];
-                        table.components[j] = table.components[j - gap];
-                    }
-                    table.entities[j] = tmp1;
-                    table.components[j] = tmp2;
+                    table.components[i] = table.components[j];
+                    table.components[i] = tmp2;
+                    i += 1;
                 }
             }
+
             std.debug.print("{any}\n", .{table.entities[0..table.len]});
+
+            std.debug.assert(std.sort.isSorted(Entity, table.entities, {}, less_than_entity));
         }
 
         /// get the index where an entity resides
@@ -199,6 +210,12 @@ pub fn Table(comptime T: type) type {
             std.debug.assert(table.entities.len == table.components.len);
             // TODO add a cache?
             return std.sort.binarySearch(Entity, entity, table.entities[0..table.len], {}, order_entity);
+        }
+
+        pub fn future_find(table: Self, entity: Entity) ?usize {
+            std.debug.assert(table.future_entities.len == table.future_components.len);
+            // TODO add a cache?
+            return std.sort.binarySearch(Entity, entity, table.future_entities[0..table.len], {}, order_entity);
         }
 
         pub fn set(table: *Self, entity: Entity, value: T) void {
@@ -227,22 +244,53 @@ pub fn Table(comptime T: type) type {
             components.* = new_components;
         }
 
+        /// where to insert into entities to maintain sorted order
+        fn lowerBound(entities: []Entity, key: Entity) usize {
+            // basically same as std.sort.binarySearch
+            // but doesn't require finding the item
+            var left: usize = 0;
+            var right: usize = entities.len;
+
+            while (left < right) {
+                const mid = left + (right - left) / 2;
+                switch (order_entity({}, key, entities[mid])) {
+                    .eq => unreachable,
+                    .gt => left = mid + 1,
+                    .lt => right = mid,
+                }
+            }
+            return left;
+        }
+
         inline fn expand(alloc: std.mem.Allocator, entities: *[]Entity, components: *[]T) void {
             expandToMin(alloc, entities, components, entities.len + 1);
         }
 
         pub fn add(table: *Self, entity: Entity, value: T) !void {
-            // but like: how do we know that we haven't already queued this up for creation?
-            // we could maintain a sorted future_components and then do a merge during update, instead of a sort?
-            const ix = table.find(entity) orelse {
+            // we maintain a sorted future_components
+            const ix = table.find(entity) orelse table.future_find(entity) orelse {
                 // if we are out of memory, allocate more
                 if (table.future_len >= table.future_components.len) {
                     expand(table.alloc, &table.future_entities, &table.future_components);
                 }
 
-                table.future_entities[table.future_len] = entity;
-                table.future_components[table.future_len] = value;
+                // now find where to insert into future entities
+                const ix = lowerBound(table.future_entities[0..table.future_len], entity);
                 table.future_len += 1;
+                std.mem.copyBackwards(
+                    Entity,
+                    table.future_entities[ix + 1 .. table.future_len],
+                    table.future_entities[ix .. table.future_len - 1],
+                );
+                std.mem.copyBackwards(
+                    T,
+                    table.future_components[ix + 1 .. table.future_len],
+                    table.future_components[ix .. table.future_len - 1],
+                );
+
+                table.future_entities[ix] = entity;
+                table.future_components[ix] = value;
+                std.debug.assert(std.sort.isSorted(Entity, table.future_entities, {}, less_than_entity));
                 return;
             };
             _ = ix;
@@ -276,10 +324,12 @@ pub fn main() !void {
     const e1 = ctx.create();
     const e2 = ctx.create();
     const e3 = ctx.create();
+    const e4 = ctx.create();
     try ctx.add(e3, .pos, @as(@Vector(4, f32), @splat(0)));
     try ctx.add(e1, .pos, @as(@Vector(4, f32), @splat(0)));
     try ctx.add(e2, .pos, @as(@Vector(4, f32), @splat(0)));
     try ctx.add(e0, .pos, @as(@Vector(4, f32), @splat(0)));
+    try ctx.add(e4, .pos, @as(@Vector(4, f32), @splat(0)));
     ctx.update();
 }
 
