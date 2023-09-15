@@ -6,12 +6,16 @@ const std = @import("std");
 // - require static knowledge of all types that could be stored in state
 // - assume that memory allocation never fails
 
-fn getIndex(ptr: anytype, slice: []@TypeOf(ptr.*)) ?usize {
+// thoughts
+// - performance is quite sensitive to the page-size
+// - requires wasting memory to avoid wasting time on finding pointers
+
+fn getIndex(ptr: anytype, slice: []@TypeOf(ptr.*)) usize {
     // based on https://github.com/FlorenceOS/Florence/blob/master/lib/util/pointers.zig
     const a = @intFromPtr(ptr);
     const b = @intFromPtr(slice.ptr);
     if (b > a) {
-        return null;
+        return std.math.maxInt(usize); // definitely bigger than page size anyway
     }
     // can @sizeOf be different from the spacing in an array?
     // I don't think so, but doesn't hurt to make sure
@@ -27,7 +31,7 @@ pub fn MemoryPool(comptime Item: type) type {
     return struct {
         const Self = @This();
 
-        const page_size = 64;
+        const page_size = 1024;
         const Page = struct {
             next: ?*Page,
             items: [page_size]Item,
@@ -137,6 +141,7 @@ pub fn MemoryPool(comptime Item: type) type {
             return @ptrCast(item);
         }
 
+        // Now this function is the performance bottleneck
         pub fn slot(pool: *Self, ptr: *Item) Slot {
             if (pool.page_list == null) {
                 return Slot{ .page = null, .slot = 0 };
@@ -145,8 +150,8 @@ pub fn MemoryPool(comptime Item: type) type {
             var page = pool.page_list.?;
             while (true) {
                 const s = getIndex(ptr, &page.items);
-                if (s != null and s.? < page_size) {
-                    return Slot{ .page = page, .slot = s.? };
+                if (s < page_size) {
+                    return Slot{ .page = page, .slot = s };
                 }
                 if (page.next == null) {
                     // item not found in any of the pages (NOOP)
@@ -169,8 +174,8 @@ pub fn MemoryPool(comptime Item: type) type {
             var s: usize = blk: {
                 while (true) {
                     const s = getIndex(ptr, &page.items);
-                    if (s != null and s.? < page_size) {
-                        break :blk s.?;
+                    if (s < page_size) {
+                        break :blk s;
                     }
                     if (page.next == null) {
                         // item not found in any of the pages (NOOP)
