@@ -28,7 +28,7 @@ pub fn Context(comptime T: type) type {
         prev: *Self,
         next: *Self,
 
-        pub fn init(alloc: std.mem.Allocator) !Self {
+        pub fn init(alloc: std.mem.Allocator) Self {
             var ctx = Self{
                 .alloc = alloc,
                 .n_entities = 0,
@@ -40,7 +40,7 @@ pub fn Context(comptime T: type) type {
             // It's pretty incredible that this is even possible
             // hell yeah comptime
             inline for (0..n_components) |i| {
-                var table = try alloc.create(Table((TFields[i].type)));
+                var table = alloc.create(Table((TFields[i].type))) catch @panic("out of memory");
                 table.* = @TypeOf(table.*).init(alloc);
                 ctx.components[i] = @intFromPtr(table);
             }
@@ -89,31 +89,23 @@ pub fn Context(comptime T: type) type {
 
         pub fn get(ctx: *Self, entity: Entity, comptime component: Component) ?fieldType(component) {
             var table = ctx.getTable(component);
-            // const ix_table: usize = @intFromEnum(component);
-            // var table: *Table(TFields[ix_table].type) = @ptrFromInt(ctx.components[ix_table]);
             return table.get(entity);
         }
 
         pub fn set(ctx: *Self, entity: Entity, comptime component: Component, value: fieldType(component)) void {
             var table = ctx.getTable(component);
-            // const ix_table: usize = @intFromEnum(component);
-            // var table: *Table(TFields[ix_table].type) = @ptrFromInt(ctx.components[ix_table]);
             table.set(entity, value);
         }
 
-        pub fn add(ctx: *Self, entity: Entity, comptime component: Component, value: fieldType(component)) !void {
+        pub fn add(ctx: *Self, entity: Entity, comptime component: Component, value: fieldType(component)) void {
             var table = ctx.getTable(component);
-            // const ix_table: usize = @intFromEnum(component);
-            // var table: *Table(TFields[ix_table].type) = @ptrFromInt(ctx.components[ix_table]);
-            try table.add(entity, value);
+            table.add(entity, value) catch @panic("out of memory");
         }
 
-        // pub fn remove(ctx: *Self, entity: Entity, comptime component: Component) void {
-        //     var table = ctx.getTable(component);
-        //     // const ix_table: usize = @intFromEnum(component);
-        //     // var table: *Table(TFields[ix_table].type) = @ptrFromInt(ctx.components[ix_table]);
-        //     table.remove(entity);
-        // }
+        pub fn remove(ctx: *Self, entity: Entity, comptime component: Component) void {
+            var table = ctx.getTable(component);
+            table.remove(entity);
+        }
     };
 }
 
@@ -165,7 +157,30 @@ pub fn Table(comptime T: type) type {
         }
 
         pub fn update(table: *Self) void {
+            // we could probably optimize this by doing the removal and merge at the same time
+            // but it seems like a tricky algorithm to implement
+
             std.debug.assert(table.entities.len == table.components.len);
+            std.debug.assert(table.future_entities.len == table.future_components.len);
+
+            // remove elements in the non-list
+            // while maintaining sorted order
+            if (table.future_nonlen > 0) {
+                var i: usize = table.find(table.future_nonentities[0]).?;
+                var j: usize = 0;
+                var k: usize = 0;
+
+                while (j < table.future_nonlen and i + k < table.len) {
+                    if (table.future_nonentities[j] == table.entities[i]) {
+                        j += 1;
+                        k += 1;
+                    }
+                    table.entities[i] = table.entities[i + k];
+                    i += 1;
+                }
+            }
+            table.len -= table.future_nonlen;
+
             // if we are out of memory, allocate more
             if (table.len + table.future_len > table.entities.len) {
                 expandToMin(table.alloc, &table.entities, &table.components, table.len + table.future_len);
@@ -200,6 +215,9 @@ pub fn Table(comptime T: type) type {
                 }
             }
 
+            table.future_len = 0;
+            table.future_nonlen = 0;
+
             std.debug.print("{any}\n", .{table.entities[0..table.len]});
 
             std.debug.assert(std.sort.isSorted(Entity, table.entities, {}, less_than_entity));
@@ -215,7 +233,12 @@ pub fn Table(comptime T: type) type {
         pub fn future_find(table: Self, entity: Entity) ?usize {
             std.debug.assert(table.future_entities.len == table.future_components.len);
             // TODO add a cache?
-            return std.sort.binarySearch(Entity, entity, table.future_entities[0..table.len], {}, order_entity);
+            return std.sort.binarySearch(Entity, entity, table.future_entities[0..table.future_len], {}, order_entity);
+        }
+
+        pub fn future_nonfind(table: Self, entity: Entity) ?usize {
+            // TODO add a cache?
+            return std.sort.binarySearch(Entity, entity, table.future_nonentities[0..table.future_nonlen], {}, order_entity);
         }
 
         pub fn set(table: *Self, entity: Entity, value: T) void {
@@ -268,7 +291,7 @@ pub fn Table(comptime T: type) type {
 
         pub fn add(table: *Self, entity: Entity, value: T) !void {
             // we maintain a sorted future_components
-            const ix = table.find(entity) orelse table.future_find(entity) orelse {
+            _ = table.find(entity) orelse table.future_find(entity) orelse {
                 // if we are out of memory, allocate more
                 if (table.future_len >= table.future_components.len) {
                     expand(table.alloc, &table.future_entities, &table.future_components);
@@ -293,8 +316,37 @@ pub fn Table(comptime T: type) type {
                 std.debug.assert(std.sort.isSorted(Entity, table.future_entities, {}, less_than_entity));
                 return;
             };
-            _ = ix;
             std.log.info("Attempted to add active {s} component of entity {} with new value {}", .{ @typeName(T), entity, value });
+        }
+
+        pub fn remove(table: *Self, entity: Entity) void {
+            _ = table.future_nonfind(entity) orelse {
+                if (table.find(entity) == null) {
+                    std.log.info("Attempted to remove {s} component of entity {} which does not have that component", .{ @typeName(T), entity });
+                    return;
+                }
+
+                if (table.future_nonlen >= table.future_nonentities.len) {
+                    const new_len: usize = @max(16, 2 * table.future_nonentities.len);
+                    var new_nonentities = table.alloc.alloc(Entity, new_len) catch @panic("out of memory");
+                    std.mem.copy(Entity, new_nonentities, table.future_nonentities);
+                    table.alloc.free(table.future_nonentities);
+                    table.future_nonentities = new_nonentities;
+                }
+
+                const ix = lowerBound(table.future_nonentities[0..table.future_nonlen], entity);
+                table.future_nonlen += 1;
+                std.mem.copyBackwards(
+                    Entity,
+                    table.future_nonentities[ix + 1 .. table.future_nonlen],
+                    table.future_nonentities[ix .. table.future_nonlen - 1],
+                );
+
+                table.future_nonentities[ix] = entity;
+                std.debug.assert(std.sort.isSorted(Entity, table.future_nonentities, {}, less_than_entity));
+                return;
+            };
+            std.log.info("Attempted to remove {s} component of entity {} which is already being removed", .{ @typeName(T), entity });
         }
     };
 }
@@ -308,14 +360,14 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
 
-    var ctx = try Context(_E).init(alloc);
+    var ctx = Context(_E).init(alloc);
     defer ctx.deinit();
 
     const e0 = ctx.create();
     ctx.set(e0, .hp, 3);
     std.debug.print("{?}\n", .{ctx.get(e0, .hp)});
 
-    try ctx.add(e0, .hp, 4);
+    ctx.add(e0, .hp, 4);
     ctx.update();
     std.debug.print("{?}\n", .{ctx.get(e0, .hp)});
     ctx.set(e0, .hp, 5);
@@ -325,11 +377,14 @@ pub fn main() !void {
     const e2 = ctx.create();
     const e3 = ctx.create();
     const e4 = ctx.create();
-    try ctx.add(e3, .pos, @as(@Vector(4, f32), @splat(0)));
-    try ctx.add(e1, .pos, @as(@Vector(4, f32), @splat(0)));
-    try ctx.add(e2, .pos, @as(@Vector(4, f32), @splat(0)));
-    try ctx.add(e0, .pos, @as(@Vector(4, f32), @splat(0)));
-    try ctx.add(e4, .pos, @as(@Vector(4, f32), @splat(0)));
+    ctx.add(e3, .pos, @as(@Vector(4, f32), @splat(0)));
+    ctx.add(e1, .pos, @as(@Vector(4, f32), @splat(0)));
+    ctx.add(e2, .pos, @as(@Vector(4, f32), @splat(0)));
+    ctx.add(e0, .pos, @as(@Vector(4, f32), @splat(0)));
+    ctx.add(e4, .pos, @as(@Vector(4, f32), @splat(0)));
+    ctx.update();
+
+    ctx.remove(e3, .pos);
     ctx.update();
 }
 
