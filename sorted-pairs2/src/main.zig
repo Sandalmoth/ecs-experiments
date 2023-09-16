@@ -120,7 +120,7 @@ pub fn Table(comptime T: type) type {
 
         pub fn destroy(table: *Self, entity: Entity) void {
             // don't destroy an entry twice and only destroy entries that exist
-            _ = table.findCreated(entity) orelse {
+            _ = table.findDestroyed(entity) orelse {
                 if (table.find(entity) == null) {
                     return;
                 }
@@ -148,9 +148,8 @@ pub fn Table(comptime T: type) type {
             std.debug.assert(table.entities.len == table.data.len);
             std.debug.assert(table.created_entities.len == table.created_data.len);
 
-            // TODO do both destroy and merge in one linear time pass?
+            // TODO can we destroy and merge created in one linear time pass ?
 
-            // destroy entries while maintaining sorted order
             if (table.destroyed_len > 0) {
                 // we know all items in destroyed_entities are also in entities
                 // because we check in the call to remove
@@ -159,7 +158,7 @@ pub fn Table(comptime T: type) type {
                 var k: usize = 1;
 
                 while (i + k < table.len) {
-                    if (table.destroyed_entities[j] == table.entities[i + k]) {
+                    if (j < table.destroyed_len and table.destroyed_entities[j] == table.entities[i + k]) {
                         j += 1;
                         k += 1;
                     } else {
@@ -171,81 +170,38 @@ pub fn Table(comptime T: type) type {
 
                 table.len -= table.destroyed_len;
                 table.destroyed_len = 0;
+
                 std.debug.assert(isSorted(table.entities[0..table.len]));
             }
 
-            // merge created and current entities maintaining sorted order
             if (table.created_len > 0) {
-                if (table.len + table.created_len > table.entities.len) {
-                    const len = table.len + table.created_len;
+                const len = table.len + table.created_len;
+                if (len > table.entities.len) {
                     expand(Entity, &table.entities, len, table.alloc);
                     expand(T, &table.data, len, table.alloc);
                 }
 
-                if (table.len == 0) {
-                    // degenerate case where we have no entities to merge into
-                    std.mem.copy(Entity, table.entities, table.created_entities[0..table.created_len]);
-                    std.mem.copy(T, table.data, table.created_data[0..table.created_len]);
-                } else {
-                    var i: usize = table.len - 1;
-                    var j: usize = table.created_len - 1;
-                    var end = table.len + table.created_len - 1;
+                var i = table.len;
+                var j = table.created_len;
+                var end = len;
 
-                    while (true) {
-                        std.debug.print("{any}\n", .{table.entities[0 .. table.len + table.created_len]});
-                        if (i >= 0 and table.entities[i] > table.created_entities[j]) {
-                            table.entities[end] = table.entities[i];
-                            table.data[end] = table.data[i];
-                            i -= 1;
-                        } else {
-                            table.entities[end] = table.created_entities[j];
-                            table.data[end] = table.created_data[j];
-                            if (j == 0) {
-                                break;
-                            }
-                            j -= 1;
-                        }
-                        // if (end == 0) {
-                        //     break;
-                        // }
-                        end -= 1;
+                while (j > 0) {
+                    if (i > 0 and table.entities[i - 1] > table.created_entities[j - 1]) {
+                        table.entities[end - 1] = table.entities[i - 1];
+                        table.data[end - 1] = table.data[i - 1];
+                        i -= 1;
+                    } else {
+                        table.entities[end - 1] = table.created_entities[j - 1];
+                        table.data[end - 1] = table.created_data[j - 1];
+                        j -= 1;
                     }
+
+                    end -= 1;
                 }
 
-                table.len += table.created_len;
-
-                // var i: usize = 0;
-                // var j: usize = 0;
-                // while (i < table.len) {
-                //     std.debug.print("{any} {any}\n", .{
-                //         table.entities[0..len],
-                //         table.created_entities[j..table.created_len],
-                //     });
-
-                //     if (i == len) {
-                //         table.entities[i] = table.created_entities[j];
-                //         table.data[i] = table.created_data[j];
-                //         j += 1;
-                //         len += 1;
-
-                //         if (j == table.created_len) {
-                //             break;
-                //         }
-                //     } else if (table.entities[i] < table.created_entities[j]) {
-                //         i += 1;
-                //     } else {
-                //         const tmp1 = table.entities[i];
-                //         table.entities[i] = table.created_entities[j];
-                //         table.created_entities[j] = tmp1;
-                //         const tmp2 = table.data[i];
-                //         table.data[i] = table.created_data[j];
-                //         table.created_data[j] = tmp2;
-                //         i += 1;
-                //     }
-                // }
-
+                table.len = len;
                 table.created_len = 0;
-                std.debug.print("{any}\n", .{table.entities[0..table.len]});
+
                 std.debug.assert(isSorted(table.entities[0..table.len]));
             }
         }
@@ -296,34 +252,6 @@ pub fn Table(comptime T: type) type {
     };
 }
 
-test "Table create, destroy & update" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var table = Table(u32).init(arena.allocator());
-
-    table.create(3, 3);
-    table.create(2, 2);
-    table.create(1, 1);
-    table.create(0, 0);
-    table.create(5, 5);
-    table.create(4, 4);
-
-    std.debug.print("{any}\n", .{table.created_entities[0..table.created_len]});
-
-    table.update();
-
-    std.debug.print("{any}\n", .{table.entities[0..table.len]});
-
-    table.destroy(2);
-    table.destroy(0);
-    table.destroy(4);
-
-    table.update();
-
-    std.debug.print("{any}\n", .{table.entities[0..table.len]});
-}
-
 test "Table create, destroy & update fuzz" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -331,26 +259,42 @@ test "Table create, destroy & update fuzz" {
     var table = Table(u32).init(arena.allocator());
     var rng = std.rand.DefaultPrng.init(2701);
 
-    const N = 16;
+    const N = 256;
 
-    for (0..N) |i| {
-        const x: u32 = @intCast(i);
-        table.create(x, x + 1);
-    }
-
-    table.update();
-    try std.testing.expect(isSorted(table.entities[0..table.len]));
-
-    for (0..65536) |_| {
+    for (0..N * N) |_| {
         const x = rng.random().uintLessThan(u32, N);
         const y = rng.random().uintLessThan(u32, N);
         const z = rng.random().uintLessThan(u32, N);
 
-        std.debug.print("{} {} {}\n", .{ x, y, z });
+        const u = blk: {
+            var a: u32 = rng.random().uintLessThan(u32, N);
+            while (a == x or a == y or a == z) {
+                a = rng.random().uintLessThan(u32, N);
+            }
+            break :blk a;
+        };
+        const v = blk: {
+            var a: u32 = rng.random().uintLessThan(u32, N);
+            while (a == x or a == y or a == z) {
+                a = rng.random().uintLessThan(u32, N);
+            }
+            break :blk a;
+        };
+        const w = blk: {
+            var a: u32 = rng.random().uintLessThan(u32, N);
+            while (a == x or a == y or a == z) {
+                a = rng.random().uintLessThan(u32, N);
+            }
+            break :blk a;
+        };
 
         table.destroy(x);
         table.destroy(y);
         table.destroy(z);
+
+        table.create(u, u);
+        table.create(v, v);
+        table.create(w, w);
 
         table.update();
         try std.testing.expect(isSorted(table.entities[0..table.len]));
@@ -359,19 +303,12 @@ test "Table create, destroy & update fuzz" {
         try std.testing.expectEqual(false, table.contains(y));
         try std.testing.expectEqual(false, table.contains(z));
 
-        table.create(x, x);
-        table.create(y, y);
-        table.create(z, z);
-
-        table.update();
-        try std.testing.expect(isSorted(table.entities[0..table.len]));
-
-        try std.testing.expectEqual(true, table.contains(x));
-        try std.testing.expectEqual(true, table.contains(y));
-        try std.testing.expectEqual(true, table.contains(z));
+        try std.testing.expectEqual(true, table.contains(u));
+        try std.testing.expectEqual(true, table.contains(v));
+        try std.testing.expectEqual(true, table.contains(w));
         // check that we've also replaced the old data
-        try std.testing.expectEqual(x, table.get(x).?);
-        try std.testing.expectEqual(y, table.get(y).?);
-        try std.testing.expectEqual(z, table.get(z).?);
+        try std.testing.expectEqual(u, table.get(u).?);
+        try std.testing.expectEqual(v, table.get(v).?);
+        try std.testing.expectEqual(w, table.get(w).?);
     }
 }
