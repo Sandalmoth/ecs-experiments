@@ -155,21 +155,18 @@ pub fn Table(comptime T: type) type {
                 // we know all items in destroyed_entities are also in entities
                 // because we check in the call to remove
                 var i: usize = table.find(table.destroyed_entities[0]).?;
-                var j: usize = 0;
-                var k: usize = 0;
+                var j: usize = 1;
+                var k: usize = 1;
 
-                while (j < table.destroyed_len and i + k < table.len) {
-                    std.debug.print("{} {} {} ", .{ i, j, k });
-                    std.debug.print("{any}\n", .{table.entities[0..table.len]});
-
-                    if (table.destroyed_entities[j] == table.entities[i]) {
+                while (i + k < table.len) {
+                    if (table.destroyed_entities[j] == table.entities[i + k]) {
                         j += 1;
                         k += 1;
                     } else {
+                        table.entities[i] = table.entities[i + k];
+                        table.data[i] = table.data[i + k];
                         i += 1;
                     }
-                    table.entities[i] = table.entities[i + k];
-                    table.data[i] = table.data[i + k];
                 }
 
                 table.len -= table.destroyed_len;
@@ -185,42 +182,80 @@ pub fn Table(comptime T: type) type {
                     expand(T, &table.data, len, table.alloc);
                 }
 
-                // i think this is a linear time algorithm, but not sure
-                var len = table.len;
-                table.len += table.created_len;
+                if (table.len == 0) {
+                    // degenerate case where we have no entities to merge into
+                    std.mem.copy(Entity, table.entities, table.created_entities[0..table.created_len]);
+                    std.mem.copy(T, table.data, table.created_data[0..table.created_len]);
+                } else {
+                    var i: usize = table.len - 1;
+                    var j: usize = table.created_len - 1;
+                    var end = table.len + table.created_len - 1;
 
-                var i: usize = 0;
-                var j: usize = 0;
-                while (i < table.len) {
-                    if (i == len) {
-                        table.entities[i] = table.created_entities[j];
-                        table.data[i] = table.created_data[j];
-                        j += 1;
-                        len += 1;
-                    }
-                    if (table.entities[i] < table.created_entities[j]) {
-                        i += 1;
-                    } else {
-                        const tmp1 = table.entities[i];
-                        table.entities[i] = table.created_entities[j];
-                        table.created_entities[j] = tmp1;
-                        const tmp2 = table.data[i];
-                        table.data[i] = table.created_data[j];
-                        table.created_data[j] = tmp2;
-                        i += 1;
+                    while (true) {
+                        std.debug.print("{any}\n", .{table.entities[0 .. table.len + table.created_len]});
+                        if (i >= 0 and table.entities[i] > table.created_entities[j]) {
+                            table.entities[end] = table.entities[i];
+                            table.data[end] = table.data[i];
+                            i -= 1;
+                        } else {
+                            table.entities[end] = table.created_entities[j];
+                            table.data[end] = table.created_data[j];
+                            if (j == 0) {
+                                break;
+                            }
+                            j -= 1;
+                        }
+                        // if (end == 0) {
+                        //     break;
+                        // }
+                        end -= 1;
                     }
                 }
 
+                table.len += table.created_len;
+
+                // var i: usize = 0;
+                // var j: usize = 0;
+                // while (i < table.len) {
+                //     std.debug.print("{any} {any}\n", .{
+                //         table.entities[0..len],
+                //         table.created_entities[j..table.created_len],
+                //     });
+
+                //     if (i == len) {
+                //         table.entities[i] = table.created_entities[j];
+                //         table.data[i] = table.created_data[j];
+                //         j += 1;
+                //         len += 1;
+
+                //         if (j == table.created_len) {
+                //             break;
+                //         }
+                //     } else if (table.entities[i] < table.created_entities[j]) {
+                //         i += 1;
+                //     } else {
+                //         const tmp1 = table.entities[i];
+                //         table.entities[i] = table.created_entities[j];
+                //         table.created_entities[j] = tmp1;
+                //         const tmp2 = table.data[i];
+                //         table.data[i] = table.created_data[j];
+                //         table.created_data[j] = tmp2;
+                //         i += 1;
+                //     }
+                // }
+
                 table.created_len = 0;
+                std.debug.print("{any}\n", .{table.entities[0..table.len]});
                 std.debug.assert(isSorted(table.entities[0..table.len]));
             }
         }
 
-        fn set(table: *Self, entity: Entity, value: T) void {
-            const i = table.find(entity) orelse {
-                return;
-            };
-            table.data[i] = value;
+        pub fn contains(table: Self, entity: Entity) bool {
+            return table.find(entity) != null;
+        }
+
+        pub fn data(table: Self) []Entity {
+            return table.data[0..table.len];
         }
 
         pub fn get(table: Self, entity: Entity) ?T {
@@ -233,11 +268,18 @@ pub fn Table(comptime T: type) type {
             return &table.data[i];
         }
 
-        fn expand(comptime U: type, data: *[]U, min: usize, alloc: std.mem.Allocator) void {
+        fn set(table: *Self, entity: Entity, value: T) void {
+            const i = table.find(entity) orelse {
+                return;
+            };
+            table.data[i] = value;
+        }
+
+        fn expand(comptime U: type, arr: *[]U, min: usize, alloc: std.mem.Allocator) void {
             const len = std.math.ceilPowerOfTwoAssert(usize, min);
             const new = alloc.alloc(U, len) catch @panic("out of memory");
-            std.mem.copy(U, new, data.*);
-            data.* = new;
+            std.mem.copy(U, new, arr.*);
+            arr.* = new;
         }
 
         fn find(table: Self, entity: Entity) ?usize {
@@ -280,4 +322,56 @@ test "Table create, destroy & update" {
     table.update();
 
     std.debug.print("{any}\n", .{table.entities[0..table.len]});
+}
+
+test "Table create, destroy & update fuzz" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var table = Table(u32).init(arena.allocator());
+    var rng = std.rand.DefaultPrng.init(2701);
+
+    const N = 16;
+
+    for (0..N) |i| {
+        const x: u32 = @intCast(i);
+        table.create(x, x + 1);
+    }
+
+    table.update();
+    try std.testing.expect(isSorted(table.entities[0..table.len]));
+
+    for (0..65536) |_| {
+        const x = rng.random().uintLessThan(u32, N);
+        const y = rng.random().uintLessThan(u32, N);
+        const z = rng.random().uintLessThan(u32, N);
+
+        std.debug.print("{} {} {}\n", .{ x, y, z });
+
+        table.destroy(x);
+        table.destroy(y);
+        table.destroy(z);
+
+        table.update();
+        try std.testing.expect(isSorted(table.entities[0..table.len]));
+
+        try std.testing.expectEqual(false, table.contains(x));
+        try std.testing.expectEqual(false, table.contains(y));
+        try std.testing.expectEqual(false, table.contains(z));
+
+        table.create(x, x);
+        table.create(y, y);
+        table.create(z, z);
+
+        table.update();
+        try std.testing.expect(isSorted(table.entities[0..table.len]));
+
+        try std.testing.expectEqual(true, table.contains(x));
+        try std.testing.expectEqual(true, table.contains(y));
+        try std.testing.expectEqual(true, table.contains(z));
+        // check that we've also replaced the old data
+        try std.testing.expectEqual(x, table.get(x).?);
+        try std.testing.expectEqual(y, table.get(y).?);
+        try std.testing.expectEqual(z, table.get(z).?);
+    }
 }
