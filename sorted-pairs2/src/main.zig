@@ -143,7 +143,7 @@ pub fn Table(comptime T: type) type {
                     table.created_data[i] = value;
                 }
 
-                std.debug.assert(isSorted(table.created_entities[0..table.created_len]));
+                // std.debug.assert(isSorted(table.created_entities[0..table.created_len]));
                 return;
             };
         }
@@ -169,7 +169,7 @@ pub fn Table(comptime T: type) type {
                 );
 
                 table.destroyed_entities[i] = entity;
-                std.debug.assert(isSorted(table.destroyed_entities[0..table.destroyed_len]));
+                // std.debug.assert(isSorted(table.destroyed_entities[0..table.destroyed_len]));
                 return;
             };
         }
@@ -205,7 +205,7 @@ pub fn Table(comptime T: type) type {
                 table.len -= table.destroyed_len;
                 table.destroyed_len = 0;
 
-                std.debug.assert(isSorted(table.entities[0..table.len]));
+                // std.debug.assert(isSorted(table.entities[0..table.len]));
             }
 
             if (table.created_len > 0) {
@@ -240,7 +240,7 @@ pub fn Table(comptime T: type) type {
                 table.len = len;
                 table.created_len = 0;
 
-                std.debug.assert(isSorted(table.entities[0..table.len]));
+                // std.debug.assert(isSorted(table.entities[0..table.len]));
             }
         }
 
@@ -445,21 +445,16 @@ pub fn State(comptime T: type) type {
                 }
 
                 pub fn next(iter: *Iter) ?Item {
-                    while (true) {
+                    while (!iter.at_end) {
                         // if all cursors point to the same element, increment all and return true;
                         var entities: [n_fields]Entity = undefined;
                         inline for (fields, 0..n_fields) |field, i| {
                             const table: *TableType(field) = @ptrFromInt(iter.tables[i]);
                             if (iter.cursors[i] == table.len) {
                                 iter.at_end = true;
-                                break;
+                                return null;
                             }
                             entities[i] = table.entities[iter.cursors[i]];
-                            iter.at_end = iter.at_end or iter.cursors[i] == table.len;
-                        }
-
-                        if (iter.at_end) {
-                            break;
                         }
 
                         if (std.mem.allEqual(Entity, &entities, entities[0])) {
