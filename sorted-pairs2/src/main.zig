@@ -389,6 +389,93 @@ pub fn State(comptime T: type) type {
     return struct {
         const Self = @This();
 
+        fn Iterator(comptime fields: anytype) type {
+            const n_fields = blk: {
+                var i: usize = 0;
+                for (fields) |_| {
+                    i += 1;
+                }
+                break :blk i;
+            };
+            std.debug.assert(n_fields > 0);
+
+            return struct {
+                const Iter = @This();
+
+                tables: [n_fields]usize,
+                cursors: [n_fields]usize,
+                at_end: bool,
+
+                pub fn init(state: *Self) Iter {
+                    var iter = Iter{
+                        .tables = undefined,
+                        .cursors = [_]usize{0} ** n_fields,
+                        .at_end = false,
+                    };
+
+                    inline for (fields, 0..) |field, i| {
+                        const j = @intFromEnum(@as(Component, field));
+                        iter.tables[i] = state.tables[j];
+                    }
+
+                    return iter;
+                }
+
+                pub fn next(iter: *Iter) bool {
+                    while (true) {
+                        // if all cursors point to the same element, increment all and return true;
+                        var entities: [n_fields]Entity = undefined;
+                        inline for (fields, 0..n_fields) |field, i| {
+                            const table: *TableType(field) = @ptrFromInt(iter.tables[i]);
+                            entities[i] = table.entities[iter.cursors[i]];
+                            iter.at_end = iter.at_end or iter.cursors[i] == table.len;
+                        }
+
+                        if (iter.at_end) {
+                            break;
+                        }
+
+                        if (std.mem.allEqual(Entity, &entities, entities[0])) {
+                            for (&iter.cursors) |*cursor| {
+                                cursor.* += 1;
+                            }
+                            return true;
+                        } else {
+                            // otherwise increment the cursor that points to the lowest numbered entity
+                            const ixmin = std.mem.indexOfMin(Entity, &entities);
+                            iter.cursors[ixmin] += 1;
+                        }
+                    }
+                    return false;
+                }
+
+                pub fn get(iter: *Iter, comptime c: Component) FieldType(c) {
+                    const i = fieldIndex(c);
+                    const table: *TableType(c) = @ptrFromInt(iter.tables[i]);
+                    return table.data[iter.cursors[i] - 1];
+                }
+
+                pub fn getPtr(iter: *Iter, comptime c: Component) *FieldType(c) {
+                    const i = fieldIndex(c);
+                    const table: *TableType(c) = @ptrFromInt(iter.tables[i]);
+                    return &table.data[iter.cursors[i] - 1];
+                }
+
+                pub fn set(iter: *Iter, comptime c: Component, value: FieldType(c)) void {
+                    const i = fieldIndex(c);
+                    const table: *TableType(c) = @ptrFromInt(iter.tables[i]);
+                    table.data[iter.cursors[i] - 1] = value;
+                }
+
+                fn fieldIndex(comptime c: Component) usize {
+                    inline for (fields, 0..) |field, i| {
+                        if (field == c) return i;
+                    }
+                    @compileError("field not in iterator");
+                }
+            };
+        }
+
         alloc: std.mem.Allocator,
         arena: std.heap.ArenaAllocator, // tables live in the arena
         prev: ?*Self,
@@ -509,6 +596,35 @@ pub fn State(comptime T: type) type {
             }
         }
 
+        pub fn add(state: *Self, entity: Entity, comptime c: Component, value: FieldType(c)) void {
+            // std.debug.assert(state.entities.contains(entity)); unsure if I want this...
+            const table = state.getTable(c);
+            table.create(entity, value);
+        }
+
+        pub fn remove(state: *Self, entity: Entity, comptime c: Component) void {
+            const table = state.getTable(c);
+            table.destroy(entity);
+        }
+
+        pub fn set(state: *Self, entity: Entity, comptime c: Component, value: FieldType(c)) void {
+            std.debug.assert(state.entities.contains(entity));
+            const table = state.getTable(c);
+            table.set(entity, value);
+        }
+
+        pub fn get(state: *Self, entity: Entity, comptime c: Component) ?FieldType(c) {
+            std.debug.assert(state.entities.contains(entity));
+            const table = state.getTable(c);
+            return table.get(entity);
+        }
+
+        pub fn getPtr(state: *Self, entity: Entity, comptime c: Component) ?*FieldType(c) {
+            std.debug.assert(state.entities.contains(entity));
+            const table = state.getTable(c);
+            return table.getPtr(entity);
+        }
+
         pub fn updateAll(state: *Self) void {
             state.entities.update();
             inline for (0..n_tables) |i| {
@@ -518,8 +634,12 @@ pub fn State(comptime T: type) type {
             }
         }
 
-        pub fn contains(state: *Self, entity: Entity) bool {
+        pub fn contains(state: Self, entity: Entity) bool {
             return state.entities.contains(entity);
+        }
+
+        pub fn iterator(state: *Self, fields: anytype) Iterator(fields) {
+            return Iterator(fields).init(state);
         }
 
         fn FieldType(comptime c: Component) type {
@@ -583,4 +703,52 @@ test "State basics" {
     // we should not be messing up the previous state
     try std.testing.expect(!state.prev.?.contains(e0));
     try std.testing.expect(state.prev.?.contains(e1));
+}
+
+const TT2 = struct {
+    int: i32,
+    float: f32,
+};
+test "State iterator" {
+    var state = State(TT2).init(std.testing.allocator, 2);
+    defer state.deinit();
+
+    const e0 = state.create();
+    state.add(e0, .int, 0);
+    state.add(e0, .float, 0.0);
+
+    const e1 = state.create();
+    state.add(e1, .int, 1);
+
+    const e2 = state.create();
+    state.add(e2, .float, 2.0);
+
+    const e3 = state.create();
+    state.add(e3, .int, 3);
+    state.add(e3, .float, 3.0);
+
+    state.updateAll();
+
+    std.debug.print("\n", .{});
+
+    {
+        var iter = state.iterator(.{.int});
+        while (iter.next()) {
+            std.debug.print("{}\n", .{iter.get(.int)});
+        }
+    }
+
+    {
+        var iter = state.iterator(.{.float});
+        while (iter.next()) {
+            std.debug.print("{}\n", .{iter.get(.float)});
+        }
+    }
+
+    {
+        var iter = state.iterator(.{ .int, .float });
+        while (iter.next()) {
+            std.debug.print("{} {}\n", .{ iter.get(.int), iter.get(.float) });
+        }
+    }
 }
