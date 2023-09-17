@@ -406,6 +406,29 @@ pub fn State(comptime T: type) type {
                 cursors: [n_fields]usize,
                 at_end: bool,
 
+                const Item = blk: {
+                    var item_fields: [n_fields]std.builtin.Type.StructField = undefined;
+
+                    inline for (fields, 0..) |field, i| {
+                        const j = @intFromEnum(@as(Component, field));
+                        item_fields[i] = std.builtin.Type.StructField{
+                            .name = std.meta.fieldNames(Component)[j],
+                            .type = *FieldType(field),
+                            .default_value = null,
+                            .is_comptime = false,
+                            .alignment = @alignOf(usize),
+                        };
+                    }
+
+                    break :blk @Type(std.builtin.Type{ .Struct = std.builtin.Type.Struct{
+                        .layout = .Auto,
+                        .is_tuple = false,
+                        .backing_integer = null,
+                        .fields = &item_fields,
+                        .decls = &.{},
+                    } });
+                };
+
                 pub fn init(state: *Self) Iter {
                     var iter = Iter{
                         .tables = undefined,
@@ -421,7 +444,7 @@ pub fn State(comptime T: type) type {
                     return iter;
                 }
 
-                pub fn next(iter: *Iter) bool {
+                pub fn next(iter: *Iter) ?Item {
                     while (true) {
                         // if all cursors point to the same element, increment all and return true;
                         var entities: [n_fields]Entity = undefined;
@@ -439,39 +462,20 @@ pub fn State(comptime T: type) type {
                             for (&iter.cursors) |*cursor| {
                                 cursor.* += 1;
                             }
-                            return true;
+                            var item: Item = undefined;
+                            inline for (fields, 0..) |field, i| {
+                                const table: *TableType(field) = @ptrFromInt(iter.tables[i]);
+                                const j = @intFromEnum(@as(Component, field));
+                                @field(item, std.meta.fieldNames(Component)[j]) = &table.data[iter.cursors[i] - 1];
+                            }
+                            return item;
                         } else {
                             // otherwise increment the cursor that points to the lowest numbered entity
                             const ixmin = std.mem.indexOfMin(Entity, &entities);
                             iter.cursors[ixmin] += 1;
                         }
                     }
-                    return false;
-                }
-
-                pub fn get(iter: *Iter, comptime c: Component) FieldType(c) {
-                    const i = fieldIndex(c);
-                    const table: *TableType(c) = @ptrFromInt(iter.tables[i]);
-                    return table.data[iter.cursors[i] - 1];
-                }
-
-                pub fn getPtr(iter: *Iter, comptime c: Component) *FieldType(c) {
-                    const i = fieldIndex(c);
-                    const table: *TableType(c) = @ptrFromInt(iter.tables[i]);
-                    return &table.data[iter.cursors[i] - 1];
-                }
-
-                pub fn set(iter: *Iter, comptime c: Component, value: FieldType(c)) void {
-                    const i = fieldIndex(c);
-                    const table: *TableType(c) = @ptrFromInt(iter.tables[i]);
-                    table.data[iter.cursors[i] - 1] = value;
-                }
-
-                fn fieldIndex(comptime c: Component) usize {
-                    inline for (fields, 0..) |field, i| {
-                        if (field == c) return i;
-                    }
-                    @compileError("field not in iterator");
+                    return null;
                 }
             };
         }
@@ -733,22 +737,20 @@ test "State iterator" {
 
     {
         var iter = state.iterator(.{.int});
-        while (iter.next()) {
-            std.debug.print("{}\n", .{iter.get(.int)});
+        while (iter.next()) |item| {
+            std.debug.print("{}\n", .{item.int.*});
         }
     }
-
     {
         var iter = state.iterator(.{.float});
-        while (iter.next()) {
-            std.debug.print("{}\n", .{iter.get(.float)});
+        while (iter.next()) |item| {
+            std.debug.print("{}\n", .{item.float.*});
         }
     }
-
     {
         var iter = state.iterator(.{ .int, .float });
-        while (iter.next()) {
-            std.debug.print("{} {}\n", .{ iter.get(.int), iter.get(.float) });
+        while (iter.next()) |item| {
+            std.debug.print("{} {}\n", .{ item.int.*, item.int.* });
         }
     }
 }
