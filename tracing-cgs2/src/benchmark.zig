@@ -103,6 +103,83 @@ fn flat(alloc: std.mem.Allocator) !void {
     }
 }
 
+const PVA = struct {
+    pos: ?*@Vector(2, f32),
+    vel: ?*@Vector(2, f32),
+    acc: ?*@Vector(2, f32),
+};
+const ST3 = struct {
+    pva: PVA,
+    pos: @Vector(2, f32),
+    vel: @Vector(2, f32),
+    acc: @Vector(2, f32),
+};
+
+fn pos_vel_acc(alloc: std.mem.Allocator) !void {
+    std.debug.print("--- Iterating with possible misses ---\n", .{});
+    var rng = std.rand.DefaultPrng.init(2701);
+
+    const M = 16;
+    const N = 1024;
+
+    std.debug.print("len\tcreate_ms\titer_ms\n", .{});
+
+    for (0..M) |m| {
+        const len = @as(usize, 1) << @intCast(m);
+        var state = State(ST3).init(alloc, 20);
+        defer state.deinit();
+
+        var timer = try std.time.Timer.start();
+
+        for (0..len) |_| {
+            const pva = state.create(.pva);
+            if (rng.random().boolean()) {
+                const pos = state.create(.pos);
+                pos.* = @Vector(2, f32){ 1.0, 1.0 };
+                pva.pos = pos;
+            }
+            if (rng.random().boolean()) {
+                const vel = state.create(.vel);
+                vel.* = @Vector(2, f32){ 1.0, 1.0 };
+                pva.vel = vel;
+            }
+            if (rng.random().boolean()) {
+                const acc = state.create(.acc);
+                acc.* = @Vector(2, f32){ 1.0, 1.0 };
+                pva.acc = acc;
+            }
+        }
+
+        const create_time: f64 = @floatFromInt(timer.lap());
+
+        for (0..N) |_| {
+            var iter = state.iterCurrent(.pva);
+            while (iter.next()) |pva| {
+                // i wish this syntax existed
+                // if (pva.vel and pva.acc) |vel, acc| {
+                //     vel += acc;
+                // }
+                if (pva.vel != null and pva.acc != null) {
+                    pva.vel.?.* += pva.acc.?.*;
+                }
+                if (pva.vel != null and pva.pos != null) {
+                    pva.pos.?.* += pva.vel.?.*;
+                }
+            }
+
+            // state = state.step(.{ .pos, .vel, .acc, .pva });
+            state = state.step(.{.pva});
+        }
+
+        const iter_time: f64 = @floatFromInt(timer.lap());
+
+        std.debug.print(
+            "{}\t{d:.2}\t{d:.2}\n",
+            .{ len, create_time * 1e-6, iter_time * 1e-6 },
+        );
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
@@ -110,4 +187,5 @@ pub fn main() !void {
     try tree(alloc);
     try chain(alloc);
     try flat(alloc);
+    try pos_vel_acc(alloc);
 }

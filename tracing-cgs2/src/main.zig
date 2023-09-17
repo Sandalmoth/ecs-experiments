@@ -514,6 +514,8 @@ pub fn State(comptime T: type) type {
                     // this element has been destroyed and the reference is invalid
                     return null;
                 }
+            } else {
+                return null;
             }
 
             const new_pool = new_state.getPool(c);

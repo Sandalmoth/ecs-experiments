@@ -450,6 +450,10 @@ pub fn State(comptime T: type) type {
                         var entities: [n_fields]Entity = undefined;
                         inline for (fields, 0..n_fields) |field, i| {
                             const table: *TableType(field) = @ptrFromInt(iter.tables[i]);
+                            if (iter.cursors[i] == table.len) {
+                                iter.at_end = true;
+                                break;
+                            }
                             entities[i] = table.entities[iter.cursors[i]];
                             iter.at_end = iter.at_end or iter.cursors[i] == table.len;
                         }
