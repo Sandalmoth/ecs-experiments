@@ -50,7 +50,7 @@ pub fn MemoryPool(comptime Item: type) type {
             count: usize, // position of last element counting from page 0, item 0
 
             pub fn next(iter: *Iterator) ?*Item {
-                if (iter.page == null or iter.count == 0) {
+                if (iter.page == null) {
                     return null;
                 }
 
