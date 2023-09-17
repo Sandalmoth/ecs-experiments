@@ -140,13 +140,13 @@ pub fn State(comptime Base: type) type {
 
             if (state.page(spec)) |i| {
                 // make sure we have enough space
-                if (state.data.items(.len)[i] == state.data.items(.cap)[i]) {
-                    var cap = state.data.items(.cap)[i] * 2;
+                if (state.pages.items(.len)[i] == state.pages.items(.cap)[i]) {
+                    const cap = state.pages.items(.cap)[i] * 2;
                     var p = Page{
                         .spec = spec,
-                        .entities = aa.alloc(Entity, cap).ptr,
-                        .data = @intFromPtr(aa.alloc(ArchetypeImpl(Base, spec), cap).ptr),
-                        .len = state.data.items(.len)[i],
+                        .entities = (aa.alloc(Entity, cap) catch @panic("out of memory")).ptr,
+                        .data = @intFromPtr((aa.alloc(ArchetypeImpl(Base, spec), cap) catch @panic("out of memory")).ptr),
+                        .len = state.pages.items(.len)[i],
                         .cap = cap,
                     };
                     state.pages.set(i, p);
@@ -157,15 +157,16 @@ pub fn State(comptime Base: type) type {
                 state.pages.items(.entities)[i][j] = entity;
             } else {
                 // add a new page fist
+                const cap = 16;
                 var p = Page{
                     .spec = spec,
-                    .entities = aa.alloc(Entity, 16).ptr,
-                    .data = @intFromPtr(aa.alloc(ArchetypeImpl(Base, spec), 16).ptr),
+                    .entities = (aa.alloc(Entity, cap) catch @panic("out of memory")).ptr,
+                    .data = @intFromPtr((aa.alloc(ArchetypeImpl(Base, spec), cap) catch @panic("out of memory")).ptr),
                     .len = 1,
                     .cap = 16,
                 };
                 p.entities[0] = entity;
-                state.pages.append(aa, p);
+                state.pages.append(aa, p) catch @panic("out of memory");
             }
 
             return entity;
@@ -192,4 +193,9 @@ const T2 = struct {
 test "state" {
     var state = State(T2).init(std.testing.allocator, 2);
     defer state.deinit();
+
+    // NOTE make void work by not allocating data storage for void types
+    const INT = comptime archetype(T2, .{.int});
+    const e0 = state.create(INT);
+    std.debug.print("{}\n", .{e0});
 }
