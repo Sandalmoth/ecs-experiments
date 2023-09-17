@@ -86,10 +86,37 @@ pub fn Table(comptime T: type) type {
             };
         }
 
+        pub fn initCopy(alloc: std.mem.Allocator, other: Self) Self {
+            std.debug.assert(other.created_len == 0);
+            std.debug.assert(other.destroyed_len == 0);
+
+            var table = Self{
+                .alloc = alloc,
+                .entities = undefined,
+                .data = undefined,
+                .len = undefined,
+                .created_entities = &[_]Entity{},
+                .created_data = &[_]T{},
+                .created_len = 0,
+                .destroyed_entities = &[_]Entity{},
+                .destroyed_len = 0,
+            };
+            // NOTE we could slightly optimieze if we only copy up until len
+            table.entities = table.alloc.dupe(Entity, other.entities) catch @panic("out of memory");
+            if (T != void) {
+                table.data = table.alloc.dupe(T, other.data) catch @panic("out of memory");
+            }
+            table.len = other.len;
+
+            return table;
+        }
+
         pub fn create(table: *Self, entity: Entity, value: T) void {
             // only create the entry if it doesn't already exist, and isn't already being created
             _ = table.findCreated(entity) orelse table.find(entity) orelse {
-                std.debug.assert(table.created_entities.len == table.created_data.len);
+                if (T != void) {
+                    std.debug.assert(table.created_entities.len == table.created_data.len);
+                }
                 if (table.created_len == table.created_entities.len) {
                     const len = @max(16, table.created_entities.len * 2);
                     expand(Entity, &table.created_entities, len, table.alloc);
@@ -105,14 +132,17 @@ pub fn Table(comptime T: type) type {
                     table.created_entities[i + 1 .. table.created_len],
                     table.created_entities[i .. table.created_len - 1],
                 );
-                std.mem.copyBackwards(
-                    T,
-                    table.created_data[i + 1 .. table.created_len],
-                    table.created_data[i .. table.created_len - 1],
-                );
-
                 table.created_entities[i] = entity;
-                table.created_data[i] = value;
+
+                if (T != void) {
+                    std.mem.copyBackwards(
+                        T,
+                        table.created_data[i + 1 .. table.created_len],
+                        table.created_data[i .. table.created_len - 1],
+                    );
+                    table.created_data[i] = value;
+                }
+
                 std.debug.assert(isSorted(table.created_entities[0..table.created_len]));
                 return;
             };
@@ -145,8 +175,10 @@ pub fn Table(comptime T: type) type {
         }
 
         pub fn update(table: *Self) void {
-            std.debug.assert(table.entities.len == table.data.len);
-            std.debug.assert(table.created_entities.len == table.created_data.len);
+            if (T != void) {
+                std.debug.assert(table.entities.len == table.data.len);
+                std.debug.assert(table.created_entities.len == table.created_data.len);
+            }
 
             // TODO can we destroy and merge created in one linear time pass ?
 
@@ -163,7 +195,9 @@ pub fn Table(comptime T: type) type {
                         k += 1;
                     } else {
                         table.entities[i] = table.entities[i + k];
-                        table.data[i] = table.data[i + k];
+                        if (T != void) {
+                            table.data[i] = table.data[i + k];
+                        }
                         i += 1;
                     }
                 }
@@ -188,11 +222,15 @@ pub fn Table(comptime T: type) type {
                 while (j > 0) {
                     if (i > 0 and table.entities[i - 1] > table.created_entities[j - 1]) {
                         table.entities[end - 1] = table.entities[i - 1];
-                        table.data[end - 1] = table.data[i - 1];
+                        if (T != void) {
+                            table.data[end - 1] = table.data[i - 1];
+                        }
                         i -= 1;
                     } else {
                         table.entities[end - 1] = table.created_entities[j - 1];
-                        table.data[end - 1] = table.created_data[j - 1];
+                        if (T != void) {
+                            table.data[end - 1] = table.created_data[j - 1];
+                        }
                         j -= 1;
                     }
 
@@ -232,6 +270,8 @@ pub fn Table(comptime T: type) type {
         }
 
         fn expand(comptime U: type, arr: *[]U, min: usize, alloc: std.mem.Allocator) void {
+            if (U == void) return;
+
             const len = std.math.ceilPowerOfTwoAssert(usize, min);
             const new = alloc.alloc(U, len) catch @panic("out of memory");
             std.mem.copy(U, new, arr.*);
@@ -311,4 +351,236 @@ test "Table create, destroy & update fuzz" {
         try std.testing.expectEqual(v, table.get(v).?);
         try std.testing.expectEqual(w, table.get(w).?);
     }
+}
+
+test "Table void fuzz" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var table = Table(void).init(arena.allocator());
+    var rng = std.rand.DefaultPrng.init(2701);
+    const N = 256;
+
+    for (0..N * N) |_| {
+        const x = rng.random().uintLessThan(u32, N);
+        const u = blk: {
+            var a: u32 = rng.random().uintLessThan(u32, N);
+            while (a == x) {
+                a = rng.random().uintLessThan(u32, N);
+            }
+            break :blk a;
+        };
+
+        table.destroy(x);
+        table.create(u, {});
+
+        table.update();
+        try std.testing.expect(isSorted(table.entities[0..table.len]));
+        try std.testing.expectEqual(false, table.contains(x));
+        try std.testing.expectEqual(true, table.contains(u));
+    }
+}
+
+pub fn State(comptime T: type) type {
+    const TFields = std.meta.fields(T);
+    const Component = std.meta.FieldEnum(T);
+    const n_tables = std.meta.fields(Component).len;
+
+    return struct {
+        const Self = @This();
+
+        alloc: std.mem.Allocator,
+        arena: std.heap.ArenaAllocator, // tables live in the arena
+        prev: ?*Self,
+
+        entities: Table(void),
+        n_total_entities: Entity,
+
+        // type-erased pointers to Tables
+        // the types are given by the order of types in TFields
+        tables: [n_tables]usize,
+
+        fn initTables(state: *Self) void {
+            state.entities = Table(void).init(state.arena.allocator());
+            inline for (0..n_tables) |i| {
+                const c: Component = @enumFromInt(i);
+                const TT = TableType(c);
+                const table = state.arena.allocator().create(TT) catch @panic("out of memory");
+                table.* = TT.init(state.arena.allocator());
+                state.tables[i] = @intFromPtr(table);
+            }
+        }
+
+        pub fn init(alloc: std.mem.Allocator, n_states: usize) *Self {
+            var state = alloc.create(Self) catch @panic("out of memory");
+            state.* = Self{
+                .alloc = alloc,
+                .arena = std.heap.ArenaAllocator.init(alloc),
+                .prev = null,
+                .entities = undefined,
+                .n_total_entities = 0,
+                .tables = [_]usize{0} ** n_tables,
+            };
+            state.initTables();
+
+            for (1..n_states) |_| {
+                const next = alloc.create(Self) catch @panic("out of memory");
+                next.* = Self{
+                    .alloc = alloc,
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .prev = null,
+                    .entities = undefined,
+                    .n_total_entities = 0,
+                    .tables = [_]usize{0} ** n_tables,
+                };
+                next.initTables();
+                next.prev = state;
+                state = next;
+            }
+
+            return state;
+        }
+
+        pub fn deinit(state: *Self) void {
+            if (state.prev) |prev| {
+                prev.deinit();
+            }
+            state.arena.deinit(); // effectively deinits the tables
+            state.alloc.destroy(state);
+        }
+
+        fn reinit(state: *Self) void {
+            _ = state.arena.reset(.retain_capacity);
+            state.initTables();
+        }
+
+        pub fn step(state: *Self) *Self {
+
+            // repurpose the oldest step as the new one
+            var next = state;
+            while (next.prev) |prev| {
+                if (prev.prev == null) {
+                    next.prev = null;
+                }
+                next = prev;
+            }
+            std.debug.assert(next.prev == null);
+            next.prev = state;
+            std.debug.assert(next != state);
+
+            _ = next.arena.reset(.retain_capacity);
+            next.entities = Table(void).initCopy(next.arena.allocator(), state.entities);
+            inline for (0..n_tables) |i| {
+                const c: Component = @enumFromInt(i);
+                const TT = TableType(c);
+                const old_table: *TT = @ptrFromInt(state.tables[i]);
+                const new_table = next.arena.allocator().create(TT) catch @panic("out of memory");
+                new_table.* = TT.initCopy(next.arena.allocator(), old_table.*);
+                next.tables[i] = @intFromPtr(new_table);
+            }
+
+            return next;
+        }
+
+        pub fn getTable(state: *Self, comptime c: Component) *TableType(c) {
+            const i: usize = @intFromEnum(c);
+            return @ptrFromInt(state.tables[i]);
+        }
+
+        pub fn create(state: *Self) Entity {
+            if (state.n_total_entities == std.math.maxInt(Entity)) {
+                @panic("out of entities");
+            }
+
+            const entity = state.n_total_entities;
+            state.entities.create(entity, {});
+            state.n_total_entities += 1;
+            return entity;
+        }
+
+        pub fn destroy(state: *Self, entity: Entity) void {
+            if (state.entities.contains(entity)) {
+                state.entities.destroy(entity);
+                inline for (0..n_tables) |i| {
+                    const c: Component = @enumFromInt(i);
+                    const table: *TableType(c) = @ptrFromInt(state.tables[i]);
+                    table.destroy(entity);
+                }
+            }
+        }
+
+        pub fn updateAll(state: *Self) void {
+            state.entities.update();
+            inline for (0..n_tables) |i| {
+                const c: Component = @enumFromInt(i);
+                const table: *TableType(c) = @ptrFromInt(state.tables[i]);
+                table.update();
+            }
+        }
+
+        pub fn contains(state: *Self, entity: Entity) bool {
+            return state.entities.contains(entity);
+        }
+
+        fn FieldType(comptime c: Component) type {
+            return TFields[@intFromEnum(c)].type;
+        }
+
+        fn TableType(comptime c: Component) type {
+            return Table(TFields[@intFromEnum(c)].type);
+        }
+
+        /// given a type, get the Component enum if it's in T
+        fn typeEnum(comptime U: type) ?Component {
+            inline for (TFields, 0..) |field, i| {
+                if (field.type == U) {
+                    return @enumFromInt(i);
+                }
+            }
+            return null;
+        }
+    };
+}
+
+const TT1 = struct {
+    int: i32,
+    float: f32,
+};
+test "State basics" {
+    var state = State(TT1).init(std.testing.allocator, 2);
+    defer state.deinit();
+
+    const e0 = state.create();
+    try std.testing.expectEqual(@as(Entity, 0), e0);
+
+    const e1 = state.create();
+    try std.testing.expectEqual(@as(Entity, 1), e1);
+
+    try std.testing.expect(!state.contains(e0));
+    try std.testing.expect(!state.contains(e1));
+
+    state.updateAll();
+
+    try std.testing.expect(state.contains(e0));
+    try std.testing.expect(state.contains(e1));
+
+    state.destroy(e0);
+    state.updateAll();
+
+    try std.testing.expect(!state.contains(e0));
+    try std.testing.expect(state.contains(e1));
+
+    state = state.step();
+
+    try std.testing.expect(!state.contains(e0));
+    try std.testing.expect(state.contains(e1));
+
+    state.destroy(e1);
+    state.updateAll();
+
+    try std.testing.expect(!state.contains(e0));
+    try std.testing.expect(!state.contains(e1));
+    // we should not be messing up the previous state
+    try std.testing.expect(!state.prev.?.contains(e0));
+    try std.testing.expect(state.prev.?.contains(e1));
 }
