@@ -83,7 +83,7 @@ pub fn State(comptime Base: type) type {
     const n_components = std.meta.fields(Component).len;
     const Spec = std.StaticBitSet(n_components);
 
-    // const VOID = Spec.initEmpty();
+    const VOID = Spec.initEmpty();
 
     return struct {
         const Self = @This();
@@ -145,7 +145,7 @@ pub fn State(comptime Base: type) type {
                     var p = Page{
                         .spec = spec,
                         .entities = (aa.alloc(Entity, cap) catch @panic("out of memory")).ptr,
-                        .data = @intFromPtr((aa.alloc(ArchetypeImpl(Base, spec), cap) catch @panic("out of memory")).ptr),
+                        .data = if (comptime spec.eql(VOID)) 0 else @intFromPtr((aa.alloc(ArchetypeImpl(Base, spec), cap) catch @panic("out of memory")).ptr),
                         .len = state.pages.items(.len)[i],
                         .cap = cap,
                     };
@@ -161,7 +161,8 @@ pub fn State(comptime Base: type) type {
                 var p = Page{
                     .spec = spec,
                     .entities = (aa.alloc(Entity, cap) catch @panic("out of memory")).ptr,
-                    .data = @intFromPtr((aa.alloc(ArchetypeImpl(Base, spec), cap) catch @panic("out of memory")).ptr),
+                    .data = if (comptime spec.eql(VOID)) 0 else @intFromPtr((aa.alloc(ArchetypeImpl(Base, spec), cap) catch @panic("out of memory")).ptr),
+                    // .data = @intFromPtr((aa.alloc(ArchetypeImpl(Base, spec), cap) catch @panic("out of memory")).ptr),
                     .len = 1,
                     .cap = 16,
                 };
@@ -171,6 +172,11 @@ pub fn State(comptime Base: type) type {
 
             return entity;
         }
+
+        // CONSIDER: A function like this isn't possible unless we can know at compile time what archetype an entity has
+        //           (we cannot) hence I think if we want to use the type-system for the archetypes
+        //           we have to be extremely careful about the design s.t. we can compile-time know the archetype of each page
+        // pub fn get(state: *Self, entity: Entity) *ArchetypeImpl(Base, k)??? {}
 
         // index into State.data that matches spec
         fn page(state: *Self, spec: Spec) ?usize {
@@ -194,8 +200,11 @@ test "state" {
     var state = State(T2).init(std.testing.allocator, 2);
     defer state.deinit();
 
-    // NOTE make void work by not allocating data storage for void types
     const INT = comptime archetype(T2, .{.int});
+    const VOID = comptime archetype(T2, .{});
+
     const e0 = state.create(INT);
     std.debug.print("{}\n", .{e0});
+    const e1 = state.create(VOID);
+    std.debug.print("{}\n", .{e1});
 }
