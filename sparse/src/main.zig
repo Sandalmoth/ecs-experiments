@@ -94,7 +94,7 @@ fn Storage(comptime T: type) type {
 
             const d = detail(entity);
             if (d.index >= storage.sparse.len) {
-                expandFill(EntityIndex, &storage.sparse, d.index, alloc, TOMB);
+                expandFill(EntityIndex, &storage.sparse, d.index + 1, alloc, TOMB);
             }
 
             if (storage.len == storage.dense.len) {
@@ -375,7 +375,7 @@ pub fn State(comptime Base: type) type {
                     .type = *std.meta.fields(Base)[j].type,
                     .default_value = null,
                     .is_comptime = false,
-                    .alignment = @alignOf(usize),
+                    .alignment = @alignOf(*std.meta.fields(Base)[j].type),
                 };
             }
 
@@ -385,7 +385,7 @@ pub fn State(comptime Base: type) type {
                 .type = Entity,
                 .default_value = null,
                 .is_comptime = false,
-                .alignment = @alignOf(usize),
+                .alignment = @alignOf(Entity),
             };
 
             return @Type(std.builtin.Type{ .Struct = std.builtin.Type.Struct{
@@ -448,37 +448,34 @@ pub fn State(comptime Base: type) type {
 
                 pub fn next(iter: *Iter) ?Item(fields) {
                     // iterate the pool with the fewest items
-                    while (iter.cursor > 0) {
+                    find_element: while (iter.cursor > 0) {
                         iter.cursor -= 1;
 
-                        var entity: Entity = undefined;
-                        var field_ptrs: [n_fields]usize = undefined;
+                        var item: Item(fields) = undefined;
 
                         // could be (inline) switch since we only access one?
                         inline for (fields, 0..) |field, i| {
                             const storage: *StorageType(field) = @ptrFromInt(iter.storage[i]);
                             if (i == iter.anchor) {
-                                entity = storage.dense[iter.cursor];
-                                field_ptrs[i] = @intFromPtr(&storage.dense[iter.cursor]);
+                                item.entity = storage.dense[iter.cursor];
+                                const j = @intFromEnum(@as(Component, field));
+                                @field(item, std.meta.fieldNames(Component)[j]) =
+                                    &storage.data[iter.cursor];
                             }
                         }
 
                         inline for (fields, 0..) |field, i| {
                             const storage: *StorageType(field) = @ptrFromInt(iter.storage[i]);
                             if (i != iter.anchor) {
-                                if (!storage.contains(entity)) {
-                                    comptime continue;
+                                if (!storage.contains(item.entity)) {
+                                    continue :find_element;
                                 }
-                                field_ptrs[i] = @intFromPtr(storage.getPtr(entity));
+                                const j = @intFromEnum(@as(Component, field));
+                                @field(item, std.meta.fieldNames(Component)[j]) =
+                                    storage.getPtr(item.entity);
                             }
                         }
 
-                        var item: Item(fields) = undefined;
-                        item.entity = entity;
-                        inline for (fields, 0..) |field, i| {
-                            const j = @intFromEnum(@as(Component, field));
-                            @field(item, std.meta.fieldNames(Component)[j]) = @ptrFromInt(field_ptrs[i]);
-                        }
                         return item;
                     }
                     return null;
@@ -512,10 +509,26 @@ test "State" {
         state.add(e3, .float, 3.0);
     }
 
+    std.debug.print("\n", .{});
+
     {
         var iter = state.iterator(.{.int});
         while (iter.next()) |e| {
             std.debug.print("{} {}\n", .{ e, e.int.* });
+        }
+    }
+
+    {
+        var iter = state.iterator(.{.float});
+        while (iter.next()) |e| {
+            std.debug.print("{} {}\n", .{ e, e.float.* });
+        }
+    }
+
+    {
+        var iter = state.iterator(.{ .int, .float });
+        while (iter.next()) |e| {
+            std.debug.print("{} {} {}\n", .{ e, e.int.*, e.float.* });
         }
     }
 }
