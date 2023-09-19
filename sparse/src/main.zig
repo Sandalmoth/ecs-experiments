@@ -125,6 +125,20 @@ fn Storage(comptime T: type) type {
         }
 
         /// entity must be in storage
+        pub fn getPtr(storage: *Self, entity: Entity) *T {
+            std.debug.assert(storage.contains(entity));
+
+            const d = detail(entity);
+            const i = storage.sparse[d.index];
+            storage.dense[i] = entity;
+            if (@sizeOf(T) > 0) {
+                return &storage.data[i];
+            } else {
+                return .{}; // dunno how this works with strange empty types...
+            }
+        }
+
+        /// entity must be in storage
         pub fn set(storage: *Self, entity: Entity, value: T) void {
             std.debug.assert(storage.contains(entity));
 
@@ -216,8 +230,127 @@ test "Storage" {
 
 pub fn State(comptime Base: type) type {
     const Component = std.meta.FieldEnum(Base);
+    const n_components = std.meta.fields(Component).len;
 
     return struct {
+        const Self = @This();
+        arena: std.heap.ArenaAllocator,
+        prev: ?*Self,
+
+        storage: [n_components]usize, // type erased pointers
+
+        reusable_entities: std.ArrayList(Entity),
+        entity_counter: EntityIndex = 0,
+
+        fn initStorage(state: *Self) void {
+            inline for (0..n_components) |i| {
+                const c: Component = @enumFromInt(i);
+                const ST = StorageType(c);
+                const storage = state.arena.allocator().create(ST) catch @panic("out of memory");
+                storage.* = ST.init();
+                state.storage[i] = @intFromPtr(storage);
+            }
+            state.reusable_entities = std.ArrayList(Entity).init(state.arena.allocator());
+        }
+
+        pub fn init(alloc: std.mem.Allocator, chain: usize) *Self {
+            var state = alloc.create(Self) catch @panic("out of memory");
+            state.* = .{
+                .arena = std.heap.ArenaAllocator.init(alloc),
+                .prev = null,
+                .storage = undefined,
+                .reusable_entities = undefined,
+            };
+            state.initStorage();
+
+            for (1..chain) |_| {
+                var next = alloc.create(Self) catch @panic("out of memory");
+                next.* = .{
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .prev = state,
+                    .storage = undefined,
+                    .reusable_entities = undefined,
+                };
+                next.initStorage();
+                state = next;
+            }
+
+            return state;
+        }
+
+        pub fn deinit(state: *Self, alloc: std.mem.Allocator) void {
+            if (state.prev) |prev| {
+                prev.deinit(alloc);
+            }
+            state.arena.deinit();
+            alloc.destroy(state);
+        }
+
+        pub fn create(state: *Self) Entity {
+            if (state.reusable_entities.items.len == 0) {
+                const entity: Entity = @bitCast(Detail{ .index = state.entity_counter, .version = 0 });
+                state.entity_counter += 1;
+                return entity;
+            }
+            return newEntity(state.reusable_entities.pop());
+        }
+
+        pub fn destroy(state: *Self, entity: Entity) void {
+            inline for (0..n_components) |i| {
+                const c: Component = @enumFromInt(i);
+                const storage = getStorage(c);
+                _ = storage.del(entity);
+            }
+            state.reusable_entities.push(entity);
+        }
+
+        pub fn exists(state: *Self, entity: Entity) bool {
+            _ = state;
+            _ = entity;
+            @compileError("not implemented");
+            // HOW?
+        }
+
+        pub fn has(state: *Self, entity: Entity, comptime c: Component) bool {
+            return state.getStorage(c).contains(entity);
+        }
+
+        pub fn add(state: *Self, entity: Entity, comptime c: Component, value: ComponentType(c)) void {
+            state.getStorage(c).add(state.arena.allocator(), entity, value);
+        }
+
+        pub fn del(state: *State, entity: Entity, comptime c: Component) void {
+            _ = state.getStorage(c).del(entity);
+        }
+
+        pub fn get(state: *State, entity: Entity, comptime c: Component) ComponentType(c) {
+            state.getStorage(c).get(entity);
+        }
+
+        pub fn getPtr(state: *State, entity: Entity, comptime c: Component) *ComponentType(c) {
+            state.getStorage(c).getPtr(entity);
+        }
+
+        pub fn set(state: *State, entity: Entity, comptime c: Component, value: ComponentType(c)) void {
+            state.getStorage(c).set(entity, value);
+        }
+
+        pub fn iterator(state: *State, comptime fields: anytype) Iterator(fields) {
+            return Iterator(fields).init(state);
+        }
+
+        fn ComponentType(comptime c: Component) type {
+            return std.meta.fields(Base)[@intFromEnum(c)].type;
+        }
+
+        fn StorageType(comptime c: Component) type {
+            return Storage(ComponentType(c));
+        }
+
+        fn getStorage(state: *Self, comptime c: Component) *StorageType(c) {
+            const i: usize = @intFromEnum(c);
+            return @ptrFromInt(state.storage[i]);
+        }
 
         // generate a type with pointers to those fields in Base specified by the fields enum
         // the fields enum should contain entries from std.meta.FieldEnum(Base)
@@ -232,7 +365,8 @@ pub fn State(comptime Base: type) type {
 
             var item_fields: [n_fields]std.builtin.Type.StructField = undefined;
 
-            // iterate over all the
+            // iterate over all parts of Base
+            // and generate a pointer type if they are in fields
             inline for (fields, 0..) |field, i| {
                 const j = @intFromEnum(@as(Component, field));
 
@@ -253,6 +387,43 @@ pub fn State(comptime Base: type) type {
                 .decls = &.{},
             } });
         }
+
+        fn Iterator(comptime fields: anytype) type {
+            const n_fields = blk: {
+                var i: usize = 0;
+                for (fields) |_| {
+                    i += 1;
+                }
+                break :blk i;
+            };
+            std.debug.assert(n_fields > 0); // disallow iterating over no fields
+
+            // how can we do this?
+            // we can't find the anchor type at compile time
+            // because storage.len is not compile time known
+            // which means we cant find the type of the Storage(Anchor).Iterator
+            // so how can we use the storage iterator for the shortest type
+            // and lookup the rest?
+
+            // the simple answer would be to just use the first field as anchor
+            // but then, we require the user to pick the correct case
+
+            return struct {
+                const Iter = @This();
+
+                // storage: [n_fields]usize,
+                // anchor: Component,
+                // iter: usize // type erased pointer to Storage(ComponentType(anchor))
+
+                fn init(state: *Self) Iter {
+                    _ = state;
+                }
+
+                pub fn next(iter: *Iter) Item(fields) {
+                    _ = iter;
+                }
+            };
+        }
     };
 }
 
@@ -260,20 +431,23 @@ const TT1 = struct {
     int: i32,
     float: f32,
 };
-test "Item" {
-    // just make sure stuff compiles
-    const a: State(TT1).Item(.{}) = undefined;
-    const b: State(TT1).Item(.{.int}) = undefined;
-    const c: State(TT1).Item(.{.float}) = undefined;
-    const d: State(TT1).Item(.{ .int, .float }) = undefined;
+test "State" {
+    var state = State(TT1).init(std.testing.allocator, 2);
+    defer state.deinit(std.testing.allocator);
 
-    // std.debug.print("{}\n", .{a});
-    // std.debug.print("{}\n", .{b});
-    // std.debug.print("{}\n", .{c});
-    // std.debug.print("{}\n", .{d});
+    {
+        const e0 = state.create();
+        state.add(e0, .int, 0);
+        state.add(e0, .float, 0.0);
 
-    _ = a;
-    _ = b;
-    _ = c;
-    _ = d;
+        const e1 = state.create();
+        state.add(e1, .int, 1);
+
+        const e2 = state.create();
+        state.add(e2, .float, 2.0);
+
+        const e3 = state.create();
+        state.add(e3, .int, 3);
+        state.add(e3, .float, 3.0);
+    }
 }
