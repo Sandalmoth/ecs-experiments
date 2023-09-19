@@ -319,23 +319,23 @@ pub fn State(comptime Base: type) type {
             state.getStorage(c).add(state.arena.allocator(), entity, value);
         }
 
-        pub fn del(state: *State, entity: Entity, comptime c: Component) void {
+        pub fn del(state: *Self, entity: Entity, comptime c: Component) void {
             _ = state.getStorage(c).del(entity);
         }
 
-        pub fn get(state: *State, entity: Entity, comptime c: Component) ComponentType(c) {
+        pub fn get(state: *Self, entity: Entity, comptime c: Component) ComponentType(c) {
             state.getStorage(c).get(entity);
         }
 
-        pub fn getPtr(state: *State, entity: Entity, comptime c: Component) *ComponentType(c) {
+        pub fn getPtr(state: *Self, entity: Entity, comptime c: Component) *ComponentType(c) {
             state.getStorage(c).getPtr(entity);
         }
 
-        pub fn set(state: *State, entity: Entity, comptime c: Component, value: ComponentType(c)) void {
+        pub fn set(state: *Self, entity: Entity, comptime c: Component, value: ComponentType(c)) void {
             state.getStorage(c).set(entity, value);
         }
 
-        pub fn iterator(state: *State, comptime fields: anytype) Iterator(fields) {
+        pub fn iterator(state: *Self, comptime fields: anytype) Iterator(fields) {
             return Iterator(fields).init(state);
         }
 
@@ -363,7 +363,7 @@ pub fn State(comptime Base: type) type {
                 break :blk i;
             };
 
-            var item_fields: [n_fields]std.builtin.Type.StructField = undefined;
+            var item_fields: [n_fields + 1]std.builtin.Type.StructField = undefined;
 
             // iterate over all parts of Base
             // and generate a pointer type if they are in fields
@@ -378,6 +378,15 @@ pub fn State(comptime Base: type) type {
                     .alignment = @alignOf(usize),
                 };
             }
+
+            // Entity id
+            item_fields[n_fields] = std.builtin.Type.StructField{
+                .name = "entity",
+                .type = Entity,
+                .default_value = null,
+                .is_comptime = false,
+                .alignment = @alignOf(usize),
+            };
 
             return @Type(std.builtin.Type{ .Struct = std.builtin.Type.Struct{
                 .layout = .Auto,
@@ -411,16 +420,68 @@ pub fn State(comptime Base: type) type {
             return struct {
                 const Iter = @This();
 
-                // storage: [n_fields]usize,
-                // anchor: Component,
-                // iter: usize // type erased pointer to Storage(ComponentType(anchor))
+                storage: [n_fields]usize,
+                anchor: usize, // index into storage and components
+                cursor: usize,
+
+                // NOTE this is not so elegant
+                // because we have to reimplement the Storage Iterator
+                // rather than reusing it for the anchor type...
 
                 fn init(state: *Self) Iter {
-                    _ = state;
+                    var iter: Iter = undefined;
+
+                    // find the pool with the fewest items
+                    var len: usize = std.math.maxInt(usize);
+                    inline for (fields, 0..) |field, i| {
+                        const storage = state.getStorage(field);
+                        iter.storage[i] = @intFromPtr(storage);
+                        if (storage.len < len) {
+                            iter.anchor = i;
+                            iter.cursor = storage.len;
+                            len = storage.len;
+                        }
+                    }
+
+                    return iter;
                 }
 
-                pub fn next(iter: *Iter) Item(fields) {
-                    _ = iter;
+                pub fn next(iter: *Iter) ?Item(fields) {
+                    // iterate the pool with the fewest items
+                    while (iter.cursor > 0) {
+                        iter.cursor -= 1;
+
+                        var entity: Entity = undefined;
+                        var field_ptrs: [n_fields]usize = undefined;
+
+                        // could be (inline) switch since we only access one?
+                        inline for (fields, 0..) |field, i| {
+                            const storage: *StorageType(field) = @ptrFromInt(iter.storage[i]);
+                            if (i == iter.anchor) {
+                                entity = storage.dense[iter.cursor];
+                                field_ptrs[i] = @intFromPtr(&storage.dense[iter.cursor]);
+                            }
+                        }
+
+                        inline for (fields, 0..) |field, i| {
+                            const storage: *StorageType(field) = @ptrFromInt(iter.storage[i]);
+                            if (i != iter.anchor) {
+                                if (!storage.contains(entity)) {
+                                    comptime continue;
+                                }
+                                field_ptrs[i] = @intFromPtr(storage.getPtr(entity));
+                            }
+                        }
+
+                        var item: Item(fields) = undefined;
+                        item.entity = entity;
+                        inline for (fields, 0..) |field, i| {
+                            const j = @intFromEnum(@as(Component, field));
+                            @field(item, std.meta.fieldNames(Component)[j]) = @ptrFromInt(field_ptrs[i]);
+                        }
+                        return item;
+                    }
+                    return null;
                 }
             };
         }
@@ -449,5 +510,12 @@ test "State" {
         const e3 = state.create();
         state.add(e3, .int, 3);
         state.add(e3, .float, 3.0);
+    }
+
+    {
+        var iter = state.iterator(.{.int});
+        while (iter.next()) |e| {
+            std.debug.print("{} {}\n", .{ e, e.int.* });
+        }
     }
 }
