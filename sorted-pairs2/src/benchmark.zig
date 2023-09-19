@@ -38,12 +38,18 @@ fn pos_vel_acc(alloc: std.mem.Allocator) !void {
         const create_time: f64 = @floatFromInt(timer.lap());
 
         for (0..N) |_| {
-            var iter_va = state.iterator(.{ .vel, .acc });
-            while (iter_va.next()) |e| {
+            // var iter_va = state.iterator(.{ .vel, .acc });
+            // while (iter_va.next()) |e| {
+            //     e.vel.* += e.acc.*;
+            // }
+            // var iter_pv = state.iterator(.{ .pos, .vel });
+            // while (iter_pv.next()) |e| {
+            //     e.pos.* += e.vel.*;
+            // }
+
+            var iter_pva = state.iterator(.{ .pos, .vel, .acc });
+            while (iter_pva.next()) |e| {
                 e.vel.* += e.acc.*;
-            }
-            var iter_pv = state.iterator(.{ .pos, .vel });
-            while (iter_pv.next()) |e| {
                 e.pos.* += e.vel.*;
             }
 
