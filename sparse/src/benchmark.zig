@@ -9,7 +9,7 @@ const PVA = struct {
 fn pos_vel_acc(alloc: std.mem.Allocator) !void {
     var rng = std.rand.DefaultPrng.init(2701);
 
-    const M = 21;
+    const M = 18;
     const N = 1024;
 
     std.debug.print("len\tcrt_ms\titer_us\n", .{});
@@ -46,7 +46,7 @@ fn pos_vel_acc(alloc: std.mem.Allocator) !void {
                 e.pos.* += e.vel.*;
             }
 
-            // state = state.step();
+            state = state.step();
         }
 
         const iter_time: f64 = @floatFromInt(timer.lap() / N);
@@ -65,7 +65,7 @@ const PV = struct {
 fn pos_vel(alloc: std.mem.Allocator) !void {
     var rng = std.rand.DefaultPrng.init(2701);
 
-    const M = 21;
+    const M = 18;
     const N = 1024;
 
     std.debug.print("len\tcrt_ms\titer_us\n", .{});
@@ -98,7 +98,7 @@ fn pos_vel(alloc: std.mem.Allocator) !void {
                 _ = e;
             }
 
-            // state = state.step();
+            state = state.step();
         }
 
         const iter_time: f64 = @floatFromInt(timer.lap() / N);

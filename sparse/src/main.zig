@@ -70,7 +70,22 @@ fn Storage(comptime T: type) type {
             };
         }
 
-        // pub fn initCopy(alloc: std.mem.Allocator, other: *Self) Self {}
+        pub fn initCopy(alloc: std.mem.Allocator, other: *Self) Self {
+            // note, we shrink the storage to the nearest power of two
+            // so that we can reclaim memory if this component is now rare
+            const len = std.math.ceilPowerOfTwoAssert(usize, @max(16, other.len));
+            var storage = Self{
+                .sparse = alloc.dupe(EntityIndex, other.sparse) catch @panic("out of memory"),
+                .dense = alloc.alloc(Entity, len) catch @panic("out of memory"),
+                .data = if (@sizeOf(T) == 0) &.{} else alloc.alloc(T, len) catch @panic("out of memory"),
+                .len = other.len,
+            };
+            std.mem.copy(Entity, storage.dense, other.dense);
+            if (@sizeOf(T) > 0) {
+                std.mem.copy(T, storage.data, other.data);
+            }
+            return storage;
+        }
 
         pub inline fn contains(storage: *Self, entity: Entity) bool {
             std.debug.assert(!isTomb(entity));
@@ -229,10 +244,12 @@ pub fn State(comptime Base: type) type {
 
         storage: [n_components]usize, // type erased pointers
 
+        entities: Storage(void), // for keeping track of what entities exist
         reusable_entities: std.ArrayList(Entity),
         entity_counter: EntityIndex = 0,
 
         fn initStorage(state: *Self) void {
+            state.entities = Storage(void).init();
             inline for (0..n_components) |i| {
                 const c: Component = @enumFromInt(i);
                 const ST = StorageType(c);
@@ -249,6 +266,7 @@ pub fn State(comptime Base: type) type {
                 .arena = std.heap.ArenaAllocator.init(alloc),
                 .prev = null,
                 .storage = undefined,
+                .entities = undefined,
                 .reusable_entities = undefined,
             };
             state.initStorage();
@@ -259,6 +277,7 @@ pub fn State(comptime Base: type) type {
                     .arena = std.heap.ArenaAllocator.init(alloc),
                     .prev = state,
                     .storage = undefined,
+                    .entities = undefined,
                     .reusable_entities = undefined,
                 };
                 next.initStorage();
@@ -280,6 +299,7 @@ pub fn State(comptime Base: type) type {
             if (state.reusable_entities.items.len == 0) {
                 const entity: Entity = @bitCast(Detail{ .index = state.entity_counter, .version = 0 });
                 state.entity_counter += 1;
+                state.entities.add(state.arena.allocator(), entity, {});
                 return entity;
             }
             return newEntity(state.reusable_entities.pop());
@@ -288,17 +308,15 @@ pub fn State(comptime Base: type) type {
         pub fn destroy(state: *Self, entity: Entity) void {
             inline for (0..n_components) |i| {
                 const c: Component = @enumFromInt(i);
-                const storage = getStorage(c);
+                const storage = state.getStorage(c);
                 _ = storage.del(entity);
             }
-            state.reusable_entities.push(entity);
+            state.reusable_entities.append(entity) catch @panic("out of memory");
+            _ = state.entities.del(entity);
         }
 
         pub fn exists(state: *Self, entity: Entity) bool {
-            _ = state;
-            _ = entity;
-            @compileError("not implemented");
-            // HOW?
+            return state.entities.contains(entity);
         }
 
         pub fn has(state: *Self, entity: Entity, comptime c: Component) bool {
@@ -323,6 +341,44 @@ pub fn State(comptime Base: type) type {
 
         pub fn set(state: *Self, entity: Entity, comptime c: Component, value: ComponentType(c)) void {
             state.getStorage(c).set(entity, value);
+        }
+
+        pub fn step(state: *Self) *Self {
+            // repurpose the oldest step as the new one
+            var next = state;
+            while (next.prev) |prev| {
+                if (prev.prev == null) {
+                    next.prev = null;
+                }
+                next = prev;
+            }
+            std.debug.assert(next.prev == null);
+            next.prev = state;
+            std.debug.assert(next != state);
+
+            // then copy all the data to the new storage.
+            _ = next.arena.reset(.retain_capacity);
+            inline for (0..n_components) |i| {
+                const c: Component = @enumFromInt(i);
+                const ST = StorageType(c);
+                const old_storage = state.getStorage(c);
+                const new_storage = next.arena.allocator().create(ST) catch @panic("out of memory");
+                new_storage.* = ST.initCopy(next.arena.allocator(), old_storage);
+                next.storage[i] = @intFromPtr(new_storage);
+            }
+            next.entities = Storage(void).initCopy(next.arena.allocator(), &state.entities);
+            next.reusable_entities = std.ArrayList(Entity).initCapacity(
+                next.arena.allocator(),
+                state.reusable_entities.capacity,
+            ) catch @panic("out of memory");
+            std.mem.copy(
+                Entity,
+                next.reusable_entities.items[0..next.reusable_entities.capacity],
+                state.reusable_entities.items,
+            );
+            next.entity_counter = state.entity_counter;
+
+            return next;
         }
 
         pub fn iterator(state: *Self, comptime fields: anytype) Iterator(fields) {
@@ -488,6 +544,12 @@ test "State" {
         const e3 = state.create();
         state.add(e3, .int, 3);
         state.add(e3, .float, 3.0);
+
+        const e4 = state.create();
+        state.destroy(e4);
+
+        try std.testing.expect(state.exists(e0));
+        try std.testing.expect(!state.exists(e4));
     }
 
     std.debug.print("\n", .{});
