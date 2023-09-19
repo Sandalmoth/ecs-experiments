@@ -9,7 +9,7 @@ const PVA = struct {
 fn pos_vel_acc(alloc: std.mem.Allocator) !void {
     var rng = std.rand.DefaultPrng.init(2701);
 
-    const M = 16;
+    const M = 21;
     const N = 1024;
 
     std.debug.print("len\tcrt_ms\titer_us\n", .{});
@@ -65,7 +65,7 @@ const PV = struct {
 fn pos_vel(alloc: std.mem.Allocator) !void {
     var rng = std.rand.DefaultPrng.init(2701);
 
-    const M = 16;
+    const M = 21;
     const N = 1024;
 
     std.debug.print("len\tcrt_ms\titer_us\n", .{});

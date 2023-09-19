@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const Entity = u32;
-const EntityVersion = u16;
-const EntityIndex = u16;
+const Entity = u64;
+const EntityVersion = u32;
+const EntityIndex = u32;
 
 const Detail = packed struct {
     index: EntityIndex,
@@ -18,12 +18,6 @@ fn newEntity(old: Entity) Entity {
     d.version += 1;
     return @bitCast(d);
 }
-
-// fn tomb(entity: Entity) Entity {
-//     var d = detail(entity);
-//     d.index = std.max.maxInt(EntityIndex);
-//     return @bitCast(d);
-// }
 
 fn isTomb(entity: Entity) bool {
     const d = detail(entity);
@@ -81,10 +75,6 @@ fn Storage(comptime T: type) type {
         pub inline fn contains(storage: *Self, entity: Entity) bool {
             std.debug.assert(!isTomb(entity));
             const d = detail(entity);
-            // std.debug.print("{}\n", .{d});
-            // std.debug.print("{}\n", .{storage.sparse.len});
-            // if (storage.sparse.len > d.index) std.debug.print("{}\n", .{storage.sparse[d.index]});
-            // if (storage.sparse.len > d.index and storage.sparse[d.index] != TOMB) std.debug.print("{}\n", .{storage.dense[storage.sparse[d.index]]});
             return storage.sparse.len > d.index and storage.sparse[d.index] != TOMB and storage.dense[storage.sparse[d.index]] == entity;
         }
 
@@ -407,16 +397,6 @@ pub fn State(comptime Base: type) type {
             };
             std.debug.assert(n_fields > 0); // disallow iterating over no fields
 
-            // how can we do this?
-            // we can't find the anchor type at compile time
-            // because storage.len is not compile time known
-            // which means we cant find the type of the Storage(Anchor).Iterator
-            // so how can we use the storage iterator for the shortest type
-            // and lookup the rest?
-
-            // the simple answer would be to just use the first field as anchor
-            // but then, we require the user to pick the correct case
-
             return struct {
                 const Iter = @This();
 
@@ -464,6 +444,7 @@ pub fn State(comptime Base: type) type {
                             }
                         }
 
+                        // then look up the fields in the other pools
                         inline for (fields, 0..) |field, i| {
                             const storage: *StorageType(field) = @ptrFromInt(iter.storage[i]);
                             if (i != iter.anchor) {
