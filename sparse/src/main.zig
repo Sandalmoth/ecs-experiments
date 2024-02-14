@@ -74,15 +74,15 @@ fn Storage(comptime T: type) type {
             // note, we shrink the storage to the nearest power of two
             // so that we can reclaim memory if this component is now rare
             const len = std.math.ceilPowerOfTwoAssert(usize, @max(16, other.len));
-            var storage = Self{
+            const storage = Self{
                 .sparse = alloc.dupe(EntityIndex, other.sparse) catch @panic("out of memory"),
                 .dense = alloc.alloc(Entity, len) catch @panic("out of memory"),
                 .data = if (@sizeOf(T) == 0) &.{} else alloc.alloc(T, len) catch @panic("out of memory"),
                 .len = other.len,
             };
-            std.mem.copy(Entity, storage.dense, other.dense);
+            @memcpy(storage.dense.ptr, other.dense);
             if (@sizeOf(T) > 0) {
-                std.mem.copy(T, storage.data, other.data);
+                @memcpy(storage.data.ptr, other.data);
             }
             return storage;
         }
@@ -184,7 +184,7 @@ fn Storage(comptime T: type) type {
 
             const len = std.math.ceilPowerOfTwoAssert(usize, @max(16, min));
             const new = alloc.alloc(U, len) catch @panic("out of memory");
-            std.mem.copy(U, new, arr.*);
+            @memcpy(new.ptr, arr.*);
             arr.* = new;
         }
 
@@ -199,7 +199,7 @@ fn Storage(comptime T: type) type {
                 new[i] = value;
             }
 
-            std.mem.copy(U, new, arr.*);
+            @memcpy(new.ptr, arr.*);
             arr.* = new;
         }
     };
@@ -371,8 +371,7 @@ pub fn State(comptime Base: type) type {
                 next.arena.allocator(),
                 state.reusable_entities.capacity,
             ) catch @panic("out of memory");
-            std.mem.copy(
-                Entity,
+            @memcpy(
                 next.reusable_entities.items[0..next.reusable_entities.capacity],
                 state.reusable_entities.items,
             );
