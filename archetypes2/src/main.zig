@@ -286,6 +286,7 @@ pub const World = struct {
             .size = @sizeOf(T),
             .alignment = @alignOf(T),
         };
+        world.n_components += 1;
     }
 
     pub fn newEntity(world: *World) !Entity {
@@ -299,11 +300,97 @@ pub const World = struct {
         return entity;
     }
 
+    /// add a component to an entity (moving it toa different archetype)
+    /// if the entity doesn't exist, does nothing
+    /// if the entity has the component, does nothing
+    pub fn add(
+        world: *World,
+        entity: Entity,
+        component_name: []const u8,
+    ) !void {
+        // make sure the entity exists
+        const page = world.entities[entity.id].page orelse return;
+
+        // first find out whether the entity has the component already
+        const component = try world.componentId(component_name);
+        var found = false;
+        for (page.components()) |c| {
+            if (c == component) {
+                found = true;
+                break;
+            }
+        }
+        if (found) return;
+
+        // make the new archetype if needed
+        const n_components = page.header.n_components + 1;
+        var new_archetype: [MAX_COMPONENTS]u32 = undefined;
+        @memcpy(new_archetype[0..page.header.n_components], page.components());
+        new_archetype[n_components - 1] = component;
+        std.sort.insertion(u32, &new_archetype, {}, std.sort.asc(u32));
+
+        const old_index = world.entities[entity.id].index;
+        try world.storeEntity(entity, new_archetype[0..n_components]);
+        const new_index = world.entities[entity.id].index;
+
+        // now copy the old data to the new
+        const new_page = world.entities[entity.id].page.?; // guaranteed by storeEntity
+        std.debug.assert(std.meta.eql(new_page.header.entities[new_index], entity));
+        // this is not good...
+        // copying is really awkward since the memory layout is different...
+        for (page.components(), 0..) |c, i| {
+            for (new_page.components(), 0..) |d, j| {
+                if (c == d) {
+                    const info = world.components[c];
+                    @memcpy(
+                        @as(
+                            [*]u8,
+                            @ptrFromInt(new_page.header.data[i]),
+                        )[new_index .. new_index + info.size],
+                        @as(
+                            [*]u8,
+                            @ptrFromInt(page.header.data[j]),
+                        )[old_index .. old_index + info.size],
+                    );
+                }
+            }
+        }
+        // finally destroy the old entity
+        page.header.len -= 1;
+        if (page.header.len == 0) {
+            return;
+        }
+
+        // copy last entity into this slot
+        page.header.entities[old_index] = page.header.entities[page.header.len];
+        for (0..page.header.n_components) |i| {
+            const info = world.components[page.header.components[i]];
+            @memcpy(
+                @as(
+                    [*]u8,
+                    @ptrFromInt(new_page.header.data[i]),
+                )[page.header.len .. page.header.len + info.size],
+                @as(
+                    [*]u8,
+                    @ptrFromInt(page.header.data[i]),
+                )[old_index .. old_index + info.size],
+            );
+        }
+
+        // and update that entities location
+        const moved_entity = page.header.entities[old_index];
+        world.entities[moved_entity.id].entity = moved_entity;
+        world.entities[moved_entity.id].index = old_index;
+    }
+
     fn storeEntity(world: *World, entity: Entity, components: []u32) !void {
         const page = try world.ensureArchetype(components);
 
         world.entities[entity.id].entity = entity;
         world.entities[entity.id].page = page;
+        world.entities[entity.id].index = @intCast(page.header.len);
+        page.header.entities[page.header.len] = entity;
+        page.header.len += 1;
     }
 
     /// returns the first page of a given archetype that has room to store it
@@ -362,6 +449,8 @@ pub const World = struct {
     fn addArchetype(world: *World, components: []u32) !u32 {
         std.debug.assert(!world.archetypeExists(components));
 
+        std.debug.print("{any}\n", .{components});
+
         const arch = world.n_archetypes;
         var spec: [MAX_COMPONENTS]Component = undefined; // could be trouble for silly max:s?
         for (components, 0..) |c, i| {
@@ -374,15 +463,16 @@ pub const World = struct {
         return arch;
     }
 
-    fn componentId(world: *World, name: []const u8) !Component {
+    fn componentId(world: *World, name: []const u8) !u32 {
         // linear search, but probably wont be on a critical path tbh
         for (0..world.n_components) |i| {
+            // std.debug.print("{s} {s}\n", .{ name, world.components[i].name });
             if (std.mem.eql(u8, name, world.components[i].name)) {
-                return i;
+                return @intCast(i);
             }
         }
 
-        std.log.err("Tried to get the Id of an unknown component: " ++ name);
+        std.log.err("Tried to get the Id of an unknown component: {s}", .{name});
         return error.UnknownComponent;
     }
 };
@@ -396,11 +486,16 @@ test "scratch" {
     world.registerComponent("float1", f32);
     world.registerComponent("float2", f32);
 
-    const e0 = world.newEntity();
-    const e1 = world.newEntity();
-    const e2 = world.newEntity();
+    const e0 = try world.newEntity();
+    const e1 = try world.newEntity();
+    const e2 = try world.newEntity();
 
-    std.debug.print("{any}\n", .{e0});
-    std.debug.print("{any}\n", .{e1});
-    std.debug.print("{any}\n", .{e2});
+    std.debug.print("{}\n", .{e0});
+    std.debug.print("{}\n", .{e1});
+    std.debug.print("{}\n", .{e2});
+
+    try world.add(e0, "float1");
+    try world.add(e1, "float1");
+    try world.add(e2, "float2");
+    try world.add(e0, "float2");
 }
