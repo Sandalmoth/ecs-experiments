@@ -97,9 +97,9 @@ comptime {
 
 const Header = struct {
     n_components: usize,
-    components: *[*]u32,
+    components: [*]u32,
+    data: [*]usize, // type erased array of [*]Component in the same order
     entities: [*]Entity,
-    data: *[*]usize, // type erased array of [*]Component in the same order
     len: usize,
     capacity: usize,
     next: ?*Page,
@@ -109,7 +109,7 @@ const Page = struct {
     header: Header,
     data: [MEMORY_PAGE_SIZE - @sizeOf(Header)]u8,
 
-    fn create(alloc: std.mem.Allocator, spec: []Component) !*Page {
+    fn create(alloc: std.mem.Allocator, spec: []const Component) !*Page {
         const page = try alloc.create(Page);
 
         page.header.n_components = spec.len;
@@ -128,7 +128,7 @@ const Page = struct {
         page.header.components = @ptrFromInt(p);
         p += @sizeOf(u32) * page.header.n_components;
         for (spec, 0..) |_, i| {
-            page.header.components.*[i] = @intCast(i);
+            page.header.components[i] = @intCast(i);
         }
 
         p = std.mem.alignForward(usize, p, @alignOf(usize));
@@ -151,8 +151,8 @@ const Page = struct {
             p += @sizeOf(Entity) * capacity;
             for (spec, 0..) |c, i| {
                 p = std.mem.alignForward(usize, p, c.alignment);
-                // std.debug.print("{s}\n", .{@typeName(@TypeOf(p.header.data))});
-                page.header.data.*[i] = p;
+                // std.debug.print("{s}\n", .{@typeName(@TypeOf(page.header.data))});
+                page.header.data[i] = p;
                 p += c.size * capacity;
             }
             if (p < @intFromPtr(&page.data[page.data.len - 1])) {
@@ -182,12 +182,33 @@ const Page = struct {
     }
 
     fn components(page: *Page) []u32 {
-        return page.header.components.*[0..page.header.n_components];
+        return page.header.components[0..page.header.n_components];
     }
 };
 
 comptime {
     std.debug.assert(@sizeOf(Page) == MEMORY_PAGE_SIZE);
+}
+
+test "page layout" {
+    std.debug.print("\n", .{});
+    const components: [3]Component = .{
+        .{ .name = "c0", .size = 8, .alignment = 8 },
+        .{ .name = "c1", .size = 4, .alignment = 4 },
+        .{ .name = "c2", .size = 32, .alignment = 4 },
+    };
+
+    const p0 = try Page.create(std.testing.allocator, components[0..3]);
+    defer p0.destroy(std.testing.allocator);
+
+    const p1 = try Page.create(std.testing.allocator, components[0..2]);
+    defer p1.destroy(std.testing.allocator);
+
+    const p2 = try Page.create(std.testing.allocator, components[1..3]);
+    defer p2.destroy(std.testing.allocator);
+
+    try std.testing.expect(p0.header.capacity < p1.header.capacity);
+    try std.testing.expect(p2.header.capacity < p1.header.capacity);
 }
 
 const Component = struct {
