@@ -155,18 +155,18 @@ fn Page(comptime T: type) type {
     }
 }
 
-fn Storage(comptime T: type) type {
+pub fn Storage(comptime T: type) type {
     return struct {
         const Self = @This();
 
         alloc: std.mem.Allocator,
         root: ?*Page(T) = null,
 
-        fn init(alloc: std.mem.Allocator) Self {
+        pub fn init(alloc: std.mem.Allocator) Self {
             return .{ .alloc = alloc };
         }
 
-        fn deinit(storage: *Self) void {
+        pub fn deinit(storage: *Self) void {
             if (storage.root) |root| {
                 root.destroy(storage.alloc);
             }
@@ -174,7 +174,7 @@ fn Storage(comptime T: type) type {
         }
 
         /// may need to allocate, hence can fail
-        fn add(storage: *Self, entity: Entity, value: T) !void {
+        pub fn add(storage: *Self, entity: Entity, value: T) !void {
             // std.debug.print("[{}]\n", .{entity});
 
             // if we don't have a root, make one
@@ -246,7 +246,7 @@ fn Storage(comptime T: type) type {
             }
         }
 
-        fn del(storage: *Self, _entity: Entity) void {
+        pub fn del(storage: *Self, _entity: Entity) void {
             if (storage.root == null) {
                 return;
             }
@@ -332,7 +332,6 @@ fn Storage(comptime T: type) type {
                             parent = &page.header.left;
                             page = left;
                         } else {
-                            std.debug.print("2\n", .{});
                             return;
                         }
                     } else {
@@ -341,7 +340,6 @@ fn Storage(comptime T: type) type {
                             parent = &page.header.right;
                             page = right;
                         } else {
-                            std.debug.print("3\n", .{});
                             return;
                         }
                     }
@@ -349,9 +347,36 @@ fn Storage(comptime T: type) type {
             }
         }
 
-        fn get(storage: *Self, entity: Entity) ?*T {
-            _ = storage;
-            _ = entity;
+        pub fn get(storage: *Self, entity: Entity) ?*T {
+            if (storage.root == null) {
+                return null;
+            }
+
+            var page = storage.root.?;
+            while (true) {
+                if (page.isBounding(entity)) {
+                    const i = page.find(entity);
+                    if (page.entities[i] == entity) {
+                        return &page.data[i];
+                    }
+                    return null;
+                } else {
+                    if (entity < page.header.min) {
+                        if (page.header.left) |left| {
+                            page = left;
+                        } else {
+                            return null;
+                        }
+                    } else {
+                        std.debug.assert(entity > page.header.max);
+                        if (page.header.right) |right| {
+                            page = right;
+                        } else {
+                            return null;
+                        }
+                    }
+                }
+            }
         }
     };
 }
@@ -381,6 +406,21 @@ test "scratch" {
         s.del(i);
         i = (i + 2_654_435_761) % (65536 * 65536);
         i = (i + 2_654_435_761) % (65536 * 65536);
+        i = (i + 2_654_435_761) % (65536 * 65536);
+    }
+
+    // now make sure the data is as expected
+    i = 0;
+    for (0..20_000) |_| {
+        try std.testing.expectEqual(null, s.get(i));
+        i = (i + 2_654_435_761) % (65536 * 65536);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(i)), s.get(i).?.*);
+        i = (i + 2_654_435_761) % (65536 * 65536);
+        try std.testing.expectEqual(null, s.get(i));
+        i = (i + 2_654_435_761) % (65536 * 65536);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(i)), s.get(i).?.*);
+        i = (i + 2_654_435_761) % (65536 * 65536);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(i)), s.get(i).?.*);
         i = (i + 2_654_435_761) % (65536 * 65536);
     }
 }
