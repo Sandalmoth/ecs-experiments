@@ -128,56 +128,108 @@ fn Page(comptime V: type) type {
 
         /// key must not be present already
         fn insert(page: *Self, alloc: std.mem.Allocator, key: u32, val: V) !void {
-            const loc = page.find(key);
-            std.debug.assert(!loc.success);
-            std.debug.assert(loc.i <= val_cap);
 
-            std.debug.print("{}\t{}\t{}\n", .{ loc.success, loc.n, loc.i });
+            // we should first find out if the data row is the bounding row for our key
+            // if so, we displace a value from the row anloc.page add our key
+            // otherwise, we can recursively try to insert into a subnode
 
-            if (loc.i < val_cap) {
+            var node: usize = 0;
+            var comp = page.node[node];
+            while (true) {
 
-                // store the item that might be displaced
-                const displaced_key = page.keys[loc.n * key_cap + val_cap - 1];
-                const displaced_val = page.keys[loc.n * val_cap + val_cap - 1];
-
-                // insert into this data row
-                std.mem.copyBackwards(
-                    u32,
-                    page.keys[loc.n * key_cap + loc.i + 1 .. loc.n * key_cap + val_cap],
-                    page.keys[loc.n * key_cap + loc.i .. loc.n * key_cap + val_cap - 1],
-                );
-                std.mem.copyBackwards(
-                    V,
-                    page.vals[loc.n * val_cap + loc.i + 1 .. loc.n * val_cap + val_cap],
-                    page.vals[loc.n * val_cap + loc.i .. loc.n * val_cap + val_cap - 1],
-                );
-                page.keys[loc.n * key_cap + loc.i] = key;
-                page.vals[loc.n * key_cap + loc.i] = val;
-                page.node[loc.n] = @max(key, page.node[loc.n]);
-
-                if (@import("builtin").mode == .Debug) {
-                    var is_sorted = true;
-                    var is_nodup = true;
-                    for (1..val_cap) |i| {
-                        if (page.keys[loc.n * key_cap + i] == 0) break;
-                        is_sorted = is_sorted and
-                            page.keys[loc.n * key_cap + i - 1] < page.keys[loc.n * key_cap + i];
-                        is_nodup = is_nodup and
-                            page.keys[loc.n * key_cap + i - 1] != page.keys[loc.n * key_cap + i];
+                // if there is space in this node, insert right here
+                if (page.keys[node * key_cap + val_cap - 1] == 0) {
+                    var i: usize = 0;
+                    const row = @as([*]u32, @ptrCast(&page.keys[0])) + node * key_cap;
+                    while (i < val_cap) : (i += 1) {
+                        if (row[i] == nil or row[i] >= key) {
+                            break;
+                        }
                     }
-                    std.debug.assert(is_sorted);
-                    std.debug.assert(is_nodup);
+
+                    //                 std.debug.print("{any}\n", .{page.keys[node * key_cap .. node * key_cap + val_cap]});
+                    std.mem.copyBackwards(
+                        u32,
+                        page.keys[node * key_cap + i + 1 .. node * key_cap + val_cap],
+                        page.keys[node * key_cap + i .. node * key_cap + val_cap - 1],
+                    );
+                    //                 std.debug.print("{any}\n", .{page.keys[node * key_cap .. node * key_cap + val_cap]});
+                    std.mem.copyBackwards(
+                        V,
+                        page.vals[node * val_cap + i + 1 .. node * val_cap + val_cap],
+                        page.vals[node * val_cap + i .. node * val_cap + val_cap - 1],
+                    );
+                    page.keys[node * key_cap + i] = key;
+                    page.vals[node * val_cap + i] = val;
+                    page.node[node] = @max(key, page.node[node]);
+                    //                 std.debug.print("{any}\n", .{page.keys[node * key_cap .. node * key_cap + val_cap]});
+
+                    //                 std.debug.print("direct insertion\n", .{});
+                    return;
                 }
 
-                if (displaced_key == 0) return;
-                page.node[loc.n] = page.keys[loc.n * key_cap + val_cap - 1];
-                return @call(.always_tail, insert, .{ page, alloc, displaced_key, displaced_val });
+                // if this data row is the bounding row, displace and insert right here
+                if (key > page.keys[node * key_cap] and
+                    key < page.keys[node * key_cap + val_cap - 1])
+                {
+                    var i: usize = 0;
+                    const row = @as([*]u32, @ptrCast(&page.keys[0])) + node * key_cap;
+                    while (i < val_cap) : (i += 1) {
+                        if (row[i] == nil or row[i] >= key) {
+                            break;
+                        }
+                    }
+
+                    const displaced_key = page.keys[node * key_cap + val_cap - 1];
+                    const displaced_val = page.vals[node * val_cap + val_cap - 1];
+
+                    //                 std.debug.print("{any}\n", .{page.keys[node * key_cap .. node * key_cap + val_cap]});
+                    std.mem.copyBackwards(
+                        u32,
+                        page.keys[node * key_cap + i + 1 .. node * key_cap + val_cap],
+                        page.keys[node * key_cap + i .. node * key_cap + val_cap - 1],
+                    );
+                    //                 std.debug.print("{any}\n", .{page.keys[node * key_cap .. node * key_cap + val_cap]});
+                    std.mem.copyBackwards(
+                        V,
+                        page.vals[node * val_cap + i + 1 .. node * val_cap + val_cap],
+                        page.vals[node * val_cap + i .. node * val_cap + val_cap - 1],
+                    );
+                    page.keys[node * key_cap + i] = key;
+                    page.vals[node * val_cap + i] = val;
+                    page.node[node] = page.keys[node * key_cap + val_cap - 1];
+                    //                 std.debug.print("{any}\n", .{page.keys[node * key_cap .. node * key_cap + val_cap]});
+
+                    //                 std.debug.print("direct insertion with displacement\n", .{});
+                    return @call(
+                        .always_tail,
+                        insert,
+                        .{ page, alloc, displaced_key, displaced_val },
+                    );
+                }
+
+                // this is not our data row, so keep searching down
+                if (key > comp) {
+                    node = 2 * (node + 1);
+                } else {
+                    node = 2 * (node + 1) - 1;
+                }
+
+                if (node < 15) {
+                    comp = page.node[node];
+                } else if (page.children[node - 15] != null) {
+                    return try @call(
+                        .always_tail,
+                        insert,
+                        .{ page.children[node - 15].?, alloc, key, val },
+                    );
+                } else {
+                    page.children[node - 15] = try Self.create(alloc, page, key, val);
+                    return;
+                }
             }
 
-            if (loc.i == val_cap) {
-                // @panic("i don't think this can happen?");
-                return;
-            }
+            unreachable;
         }
 
         fn debugPrint(page: *Self, depth: u32) void {
@@ -217,19 +269,62 @@ test "page layout" {
     // }
 }
 
-test "insert many" {
-    std.debug.print("\n", .{});
-    var p = try Page(usize).create(std.testing.allocator, null, 100, 0);
-    defer p.destroy(std.testing.allocator);
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
 
-    var i: u32 = 2_654_435_761;
-    for (0..1_000) |j| {
-        std.debug.print("trying to insert\t{}\t{}\n", .{ i, j });
-        try p.insert(std.testing.allocator, i, j);
+    // var i: u32 = 2_654_435_761;
+    // for (0..100_000) |j| {
+    //     // std.debug.print("trying to insert\t{}\t{}\n", .{ i, j });
+    //     // p.debugPrint(0);
+    //     try p.insert(alloc, i, j);
+    //     i +%= 2_654_435_761;
+    // }
+
+    // p.debugPrint(0);
+
+    const M = 21;
+
+    std.debug.print("len\tcrt_ns\tget_ns\n", .{});
+
+    var acc: f32 = 0.0;
+
+    for (0..M) |m| {
+        const len = @as(usize, 1) << @intCast(m);
+        var i: u32 = 2_654_435_761;
+        var p = try Page(f32).create(alloc, null, i, 0);
         i +%= 2_654_435_761;
+        defer p.destroy(alloc);
+
+        var timer = try std.time.Timer.start();
+
+        for (0..len) |j| {
+            try p.insert(alloc, i, @as(f32, @floatFromInt(j)));
+            i +%= 2_654_435_761;
+        }
+
+        const create_time: f64 = @floatFromInt(timer.lap());
+
+        i = 2_654_435_761;
+        i +%= 2_654_435_761;
+        for (0..len) |_| {
+            const res = p.find(i);
+            acc += @as(f32, @floatFromInt(res.i));
+            i +%= 2_654_435_761;
+        }
+
+        const get_time: f64 = @floatFromInt(timer.lap());
+
+        const il2: f32 = 1 / @as(f32, @floatFromInt(len));
+
+        std.debug.print(
+            "{}\t{d:.2}\t{d:.2}\n",
+            .{ len, create_time * il2, get_time * il2 },
+        );
     }
 
-    p.debugPrint(0);
+    std.debug.print("printing to avoid optimizer dropping my result\n{}\n", .{acc});
 }
 
 test "scratch" {
