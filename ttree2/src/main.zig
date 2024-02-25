@@ -86,7 +86,9 @@ fn Page(comptime V: type) type {
             var node: u8 = 0;
             var walk = page;
             var mark: FindResult = undefined;
-            mark.n = 0xFF;
+            mark.page = page;
+            mark.n = 0;
+            mark.i = 0;
 
             var comp: u32 = walk.node[node];
             while (comp != nil) {
@@ -114,9 +116,8 @@ fn Page(comptime V: type) type {
             // TODO optimize, i'm thinking a branchless simd linear search
             const mark_n: usize = @intCast(mark.n);
             const row = @as([*]u32, @ptrCast(&page.keys[0])) + mark_n * key_cap;
-            // [mark_n * key_cap .. mark_n * key_cap + val_cap].;
             while (mark.i < val_cap) : (mark.i += 1) {
-                if (row[mark.i] >= key) {
+                if (row[mark.i] == nil or row[mark.i] >= key) {
                     break;
                 }
             }
@@ -125,11 +126,58 @@ fn Page(comptime V: type) type {
             return mark;
         }
 
+        /// key must not be present already
         fn insert(page: *Self, alloc: std.mem.Allocator, key: u32, val: V) !void {
-            _ = page;
-            _ = alloc;
-            _ = key;
-            _ = val;
+            const loc = page.find(key);
+            std.debug.assert(!loc.success);
+            std.debug.assert(loc.i <= val_cap);
+
+            std.debug.print("{}\t{}\t{}\n", .{ loc.success, loc.n, loc.i });
+
+            if (loc.i < val_cap) {
+
+                // store the item that might be displaced
+                const displaced_key = page.keys[loc.n * key_cap + val_cap - 1];
+                const displaced_val = page.keys[loc.n * val_cap + val_cap - 1];
+
+                // insert into this data row
+                std.mem.copyBackwards(
+                    u32,
+                    page.keys[loc.n * key_cap + loc.i + 1 .. loc.n * key_cap + val_cap],
+                    page.keys[loc.n * key_cap + loc.i .. loc.n * key_cap + val_cap - 1],
+                );
+                std.mem.copyBackwards(
+                    V,
+                    page.vals[loc.n * val_cap + loc.i + 1 .. loc.n * val_cap + val_cap],
+                    page.vals[loc.n * val_cap + loc.i .. loc.n * val_cap + val_cap - 1],
+                );
+                page.keys[loc.n * key_cap + loc.i] = key;
+                page.vals[loc.n * key_cap + loc.i] = val;
+                page.node[loc.n] = @max(key, page.node[loc.n]);
+
+                if (@import("builtin").mode == .Debug) {
+                    var is_sorted = true;
+                    var is_nodup = true;
+                    for (1..val_cap) |i| {
+                        if (page.keys[loc.n * key_cap + i] == 0) break;
+                        is_sorted = is_sorted and
+                            page.keys[loc.n * key_cap + i - 1] < page.keys[loc.n * key_cap + i];
+                        is_nodup = is_nodup and
+                            page.keys[loc.n * key_cap + i - 1] != page.keys[loc.n * key_cap + i];
+                    }
+                    std.debug.assert(is_sorted);
+                    std.debug.assert(is_nodup);
+                }
+
+                if (displaced_key == 0) return;
+                page.node[loc.n] = page.keys[loc.n * key_cap + val_cap - 1];
+                return @call(.always_tail, insert, .{ page, alloc, displaced_key, displaced_val });
+            }
+
+            if (loc.i == val_cap) {
+                // @panic("i don't think this can happen?");
+                return;
+            }
         }
 
         fn debugPrint(page: *Self, depth: u32) void {
@@ -169,16 +217,42 @@ test "page layout" {
     // }
 }
 
+test "insert many" {
+    std.debug.print("\n", .{});
+    var p = try Page(usize).create(std.testing.allocator, null, 100, 0);
+    defer p.destroy(std.testing.allocator);
+
+    var i: u32 = 2_654_435_761;
+    for (0..1_000) |j| {
+        std.debug.print("trying to insert\t{}\t{}\n", .{ i, j });
+        try p.insert(std.testing.allocator, i, j);
+        i +%= 2_654_435_761;
+    }
+
+    p.debugPrint(0);
+}
+
 test "scratch" {
     std.debug.print("\n", .{});
-    var p = try Page(f32).create(std.testing.allocator, null, 100, 0.0);
+    var p = try Page(usize).create(std.testing.allocator, null, 100, 0);
     defer p.destroy(std.testing.allocator);
     p.debugPrint(0);
 
-    const res99 = p.find(99);
-    std.debug.print("{}\t{}\t{}\n", .{ res99.success, res99.i, res99.n });
-    const res100 = p.find(100);
-    std.debug.print("{}\t{}\t{}\n", .{ res100.success, res100.i, res100.n });
-    const res101 = p.find(101);
-    std.debug.print("{}\t{}\t{}\n", .{ res101.success, res101.i, res101.n });
+    var res99 = p.find(99);
+    std.debug.print("{}\t{}\t{}\n", .{ res99.success, res99.n, res99.i });
+    var res100 = p.find(100);
+    std.debug.print("{}\t{}\t{}\n", .{ res100.success, res100.n, res100.i });
+    var res101 = p.find(101);
+    std.debug.print("{}\t{}\t{}\n", .{ res101.success, res101.n, res101.i });
+
+    try p.insert(std.testing.allocator, 99, 1);
+    try p.insert(std.testing.allocator, 101, 2);
+    p.debugPrint(0);
+
+    res99 = p.find(99);
+    std.debug.print("{}\t{}\t{}\n", .{ res99.success, res99.n, res99.i });
+    res100 = p.find(100);
+    std.debug.print("{}\t{}\t{}\n", .{ res100.success, res100.n, res100.i });
+    res101 = p.find(101);
+    std.debug.print("{}\t{}\t{}\n", .{ res101.success, res101.n, res101.i });
 }
