@@ -126,6 +126,15 @@ fn Page(comptime V: type) type {
             return mark;
         }
 
+        fn get(page: *Self, key: u32) ?*V {
+            const result = page.find(key);
+            if (result.success) {
+                return &page.vals[result.n * val_cap + result.i];
+            } else {
+                return null;
+            }
+        }
+
         /// key must not be present already
         fn insert(page: *Self, alloc: std.mem.Allocator, key: u32, val: V) !void {
 
@@ -288,19 +297,19 @@ pub fn main() !void {
 
     std.debug.print("len\tcrt_ns\tget_ns\n", .{});
 
-    var acc: f32 = 0.0;
+    var acc: @Vector(4, f32) = @splat(0.0);
 
     for (0..M) |m| {
         const len = @as(usize, 1) << @intCast(m);
         var i: u32 = 2_654_435_761;
-        var p = try Page(f32).create(alloc, null, i, 0);
+        var p = try Page(@Vector(4, f32)).create(alloc, null, i, @splat(0.0));
         i +%= 2_654_435_761;
         defer p.destroy(alloc);
 
         var timer = try std.time.Timer.start();
 
         for (0..len) |j| {
-            try p.insert(alloc, i, @as(f32, @floatFromInt(j)));
+            try p.insert(alloc, i, @as(@Vector(4, f32), @splat(@floatFromInt(j))));
             i +%= 2_654_435_761;
         }
 
@@ -309,8 +318,7 @@ pub fn main() !void {
         i = 2_654_435_761;
         i +%= 2_654_435_761;
         for (0..len) |_| {
-            const res = p.find(i);
-            acc += @as(f32, @floatFromInt(res.i));
+            acc += p.get(i).?.*;
             i +%= 2_654_435_761;
         }
 
