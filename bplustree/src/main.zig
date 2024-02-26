@@ -91,6 +91,25 @@ pub fn Storage(
                     alloc.destroy(np(node.children));
                 }
             }
+
+            fn _debugPrint(node: *Node, height: u32) void {
+                std.debug.assert(height > 0);
+                std.debug.print("  [ ", .{});
+                for (0..node.len) |i| {
+                    std.debug.print("{}, ", .{node.keys[i]});
+                }
+                std.debug.print("] at height {} \n", .{height});
+
+                if (height == 1) {
+                    for (0..node.len) |i| {
+                        lp(node.children).leaves[i]._debugPrint();
+                    }
+                } else {
+                    for (0..node.len) |i| {
+                        np(node.children).nodes[i]._debugPrint(height - 1);
+                    }
+                }
+            }
         };
 
         // leave space for one extra node if we need to split during insertion
@@ -170,6 +189,14 @@ pub fn Storage(
                 // we need to split, but we can't do it ourselves
                 // so return 1 and let the caller deal with it
                 return true;
+            }
+
+            fn _debugPrint(leaf: *Leaf) void {
+                std.debug.print("  {{ ", .{});
+                for (0..leaf.len) |i| {
+                    std.debug.print("{}: {}, ", .{ leaf.keys[i], leaf.vals[0] });
+                }
+                std.debug.print("}}\n", .{});
             }
         };
 
@@ -279,6 +306,17 @@ pub fn Storage(
             std.debug.assert(ptr != 0);
             return @ptrFromInt(ptr);
         }
+
+        fn debugPrint(storage: *Self) void {
+            std.debug.print("Storage: \n", .{});
+            if (storage.root == 0) return;
+
+            if (storage.height == 0) {
+                lp(storage.root).leaves[0]._debugPrint();
+            } else {
+                np(storage.root).nodes[0]._debugPrint(storage.height);
+            }
+        }
     };
 }
 
@@ -291,9 +329,10 @@ pub fn main() !void {
     defer s.deinit();
 
     var i: u32 = 0;
-    for (0..100) |j| {
+    for (0..10) |j| {
         try s.add(i, j);
-        i = (i + 40507) % 65536;
+        s.debugPrint();
+        i = (i + 40507) % 256;
     }
 }
 
