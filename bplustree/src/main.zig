@@ -95,8 +95,8 @@ pub fn Storage(
             fn _debugPrint(node: *Node, height: u32) void {
                 std.debug.assert(height > 0);
                 std.debug.print("  [ ", .{});
-                for (0..node.len) |i| {
-                    std.debug.print("{}, ", .{node.keys[i]});
+                for (0..node.len - 1) |i| {
+                    std.debug.print("{} ", .{node.keys[i]});
                 }
                 std.debug.print("] at height {} \n", .{height});
 
@@ -194,7 +194,7 @@ pub fn Storage(
             fn _debugPrint(leaf: *Leaf) void {
                 std.debug.print("  {{ ", .{});
                 for (0..leaf.len) |i| {
-                    std.debug.print("{}: {}, ", .{ leaf.keys[i], leaf.vals[0] });
+                    std.debug.print("{}: {}, ", .{ leaf.keys[i], leaf.vals[i] });
                 }
                 std.debug.print("}}\n", .{});
             }
@@ -260,8 +260,8 @@ pub fn Storage(
                         lp(storage.root).leaves[1].vals[0 .. half + 1],
                         lp(storage.root).leaves[0].vals[half .. LEAF_SIZE + 1],
                     );
-                    lp(storage.root).leaves[0].vals[0] = half;
-                    lp(storage.root).leaves[1].vals[0] = LEAF_SIZE + 1 - half;
+                    lp(storage.root).leaves[0].len = half;
+                    lp(storage.root).leaves[1].len = LEAF_SIZE + 1 - half;
                     lp(storage.root).leaves[0].next = &lp(storage.root).leaves[1];
                     lp(storage.root).leaves[1].prev = &lp(storage.root).leaves[0];
 
