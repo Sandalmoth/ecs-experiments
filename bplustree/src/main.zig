@@ -125,7 +125,7 @@ pub fn Storage(
                             return .none; // early exit as insertion only affected this leaf
                         },
                         .move_prev => {
-                            @panic("TODO node add move prev");
+                            @panic("TODO node add leaf move prev");
                         },
                         .move_next => {
                             // move right can trigger more move rights
@@ -136,11 +136,19 @@ pub fn Storage(
                         },
                         .split => {
                             // make space for the split
-                            std.mem.copyBackwards(
-                                u32,
-                                node.keys[i..node.len],
-                                node.keys[i - 1 .. node.len - 1],
-                            );
+                            if (i > 0) {
+                                std.mem.copyBackwards(
+                                    u32,
+                                    node.keys[i..node.len],
+                                    node.keys[i - 1 .. node.len - 1],
+                                );
+                            } else {
+                                std.mem.copyBackwards(
+                                    u32,
+                                    node.keys[i + 1 .. node.len + 1],
+                                    node.keys[i..node.len],
+                                );
+                            }
                             std.mem.copyBackwards(
                                 usize,
                                 node.children[i + 1 .. node.len + 1],
@@ -154,7 +162,24 @@ pub fn Storage(
                         },
                     }
                 } else {
-                    @panic("TODO add to a node with node children");
+                    const effect = try np(node.children[i]).add(alloc, height - 1, key, val);
+                    switch (effect) {
+                        .none => {
+                            if (i > 0) {
+                                node.keys[i - 1] = np(node.children[i]).keys[0];
+                            }
+                            return .none; // early exit, no rearranging happening
+                        },
+                        .move_prev => {
+                            @panic("TODO node add node move prev");
+                        },
+                        .move_next => {
+                            @panic("TODO node add node move next");
+                        },
+                        .split => {
+                            @panic("TODO node add node split");
+                        },
+                    }
                 }
 
                 if (node.len <= NODE_SIZE) {
