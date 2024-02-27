@@ -360,7 +360,24 @@ pub fn Storage(
                     storage.root,
                 ).nodes[0].add(storage.alloc, storage.height, key, val);
                 if (split) {
-                    @panic("TODO: split root node");
+                    // note the hardcoded (0, 1) split, since this only happens in one case
+                    np(storage.root).nodes[1] = Node.init();
+                    const half = (NODE_SIZE + 1) / 2;
+                    @memcpy( // MIGHT BE WRONG?
+                        np(storage.root).nodes[1].keys[0 .. half - 1],
+                        np(storage.root).nodes[0].keys[half..NODE_SIZE],
+                    );
+                    np(storage.root).nodes[0].len = half;
+                    np(storage.root).nodes[1].len = NODE_SIZE + 1 - half;
+
+                    const root = try storage.alloc.create(NodePage);
+                    root.nodes[0] = Node.init();
+                    root.nodes[0].children = storage.root;
+                    root.nodes[0].keys[0] = np(storage.root).nodes[1].keys[0];
+                    root.nodes[0].len = 2;
+
+                    storage.root = @intFromPtr(root);
+                    storage.height += 1;
                 }
             }
         }
