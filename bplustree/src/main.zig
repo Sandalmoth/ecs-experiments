@@ -11,7 +11,6 @@ const std = @import("std");
 fn lowerBound(data: []const u32, key: u32) u32 {
     var left: u32 = 0;
     var right: u32 = @intCast(data.len);
-
     while (left < right) {
         const mid = left + (right - left) / 2;
         if (key == data[mid]) {
@@ -22,8 +21,21 @@ fn lowerBound(data: []const u32, key: u32) u32 {
             left = mid + 1;
         }
     }
-
     return left;
+
+    // below is faster, but less safe
+    // TODO benchmark once data structure is finished
+    // var left: u32 = 0;
+    // var right: u32 = @as(u32, @intCast(data.len));
+    // while (left < right) {
+    //     const mid = (left +% right) / 2;
+    //     if (data[mid] >= key) {
+    //         right = mid;
+    //     } else {
+    //         left = mid +% 1;
+    //     }
+    // }
+    // return left;
 }
 
 test "lowerBound" {
@@ -92,9 +104,76 @@ pub fn Storage(
                 }
             }
 
+            fn add(node: *Node, alloc: std.mem.Allocator, height: u32, key: u32, val: T) !bool {
+                std.debug.assert(height > 0);
+                // find where into this node our data would fit
+                const i = lowerBound(node.keys[0 .. node.len - 1], key);
+
+                if (height == 1) {
+                    const split = lp(node.children).leaves[i].add(key, val);
+                    if (split) {
+                        // we need to make room in the LeafNode child array for the expansion
+                        // then split the full node into that new space
+                        // reconnect all the pointers
+                        // and finally, update our array of keys
+
+                        std.mem.copyBackwards(
+                            Leaf,
+                            lp(node.children).leaves[i + 1 .. node.len + 1],
+                            lp(node.children).leaves[i..node.len],
+                        );
+                        std.mem.copyBackwards(
+                            u32,
+                            node.keys[i..node.len],
+                            node.keys[i - 1 .. node.len - 1],
+                        );
+
+                        lp(node.children).leaves[i + 1] = Leaf.init();
+                        const half = (LEAF_SIZE + 1) / 2;
+                        @memcpy(
+                            lp(node.children).leaves[i + 1].keys[0 .. half + 1],
+                            lp(node.children).leaves[i].keys[half .. LEAF_SIZE + 1],
+                        );
+                        @memcpy(
+                            lp(node.children).leaves[i + 1].vals[0 .. half + 1],
+                            lp(node.children).leaves[i].vals[half .. LEAF_SIZE + 1],
+                        );
+                        lp(node.children).leaves[i].len = half;
+                        lp(node.children).leaves[i + 1].len = LEAF_SIZE + 1 - half;
+                        lp(node.children).leaves[i].next = &lp(node.children).leaves[i + 1];
+                        lp(node.children).leaves[i + 1].prev = &lp(node.children).leaves[i];
+
+                        if (i > 0) {
+                            lp(node.children).leaves[i].prev = &lp(node.children).leaves[i - 1];
+                            lp(node.children).leaves[i - 1].next = &lp(node.children).leaves[i];
+                        }
+                        if (i < NODE_SIZE - 1) {
+                            lp(node.children).leaves[i + 1].next = &lp(node.children).leaves[i + 2];
+                            lp(node.children).leaves[i + 2].prev = &lp(node.children).leaves[i + 1];
+                        }
+
+                        if (i > 0) {
+                            node.keys[i - 1] = lp(node.children).leaves[i].keys[0];
+                        }
+                        node.keys[i] = lp(node.children).leaves[i + 1].keys[0];
+                        node.len += 1;
+                    } else {
+                        if (i > 0) {
+                            node.keys[i - 1] = lp(node.children).leaves[i].keys[0];
+                        }
+                        node.keys[i] = lp(node.children).leaves[i + 1].keys[0];
+                    }
+                } else {
+                    @panic("TODO: add to a node with node children");
+                }
+                _ = alloc;
+
+                return node.len > NODE_SIZE;
+            }
+
             fn _debugPrint(node: *Node, height: u32) void {
                 std.debug.assert(height > 0);
-                std.debug.print("  [ ", .{});
+                std.debug.print("  {} [ ", .{node.len});
                 for (0..node.len - 1) |i| {
                     std.debug.print("{} ", .{node.keys[i]});
                 }
@@ -134,7 +213,7 @@ pub fn Storage(
                 };
             }
 
-            fn add(leaf: *Leaf, key: u32, val: T) !bool {
+            fn add(leaf: *Leaf, key: u32, val: T) bool {
                 // find where into this node our data would fit
                 const i = lowerBound(leaf.keys[0..leaf.len], key);
 
@@ -143,13 +222,13 @@ pub fn Storage(
                 if (i < leaf.len) {
                     std.mem.copyBackwards(
                         u32,
-                        leaf.keys[i + 1 .. leaf.len],
-                        leaf.keys[i .. leaf.len - 1],
+                        leaf.keys[i + 1 .. leaf.len + 1],
+                        leaf.keys[i..leaf.len],
                     );
                     std.mem.copyBackwards(
                         T,
-                        leaf.vals[i + 1 .. leaf.len],
-                        leaf.vals[i .. leaf.len - 1],
+                        leaf.vals[i + 1 .. leaf.len + 1],
+                        leaf.vals[i..leaf.len],
                     );
                 }
                 leaf.keys[i] = key;
@@ -192,7 +271,7 @@ pub fn Storage(
             }
 
             fn _debugPrint(leaf: *Leaf) void {
-                std.debug.print("  {{ ", .{});
+                std.debug.print("  {} {{ ", .{leaf.len});
                 for (0..leaf.len) |i| {
                     std.debug.print("{}: {}, ", .{ leaf.keys[i], leaf.vals[i] });
                 }
@@ -247,8 +326,9 @@ pub fn Storage(
             }
 
             if (storage.height == 0) {
-                const split = try lp(storage.root).leaves[0].add(key, val);
+                const split = lp(storage.root).leaves[0].add(key, val);
                 if (split) {
+                    // note the hardcoded (0, 1) split, since this only happens in one case
                     // split the leaves
                     lp(storage.root).leaves[1] = Leaf.init();
                     const half = (LEAF_SIZE + 1) / 2;
@@ -276,7 +356,12 @@ pub fn Storage(
                     storage.height += 1;
                 }
             } else {
-                //
+                const split = try np(
+                    storage.root,
+                ).nodes[0].add(storage.alloc, storage.height, key, val);
+                if (split) {
+                    @panic("TODO: split root node");
+                }
             }
         }
 
@@ -308,7 +393,7 @@ pub fn Storage(
         }
 
         fn debugPrint(storage: *Self) void {
-            std.debug.print("Storage: \n", .{});
+            std.debug.print("Storage <{s}> \n", .{@typeName(T)});
             if (storage.root == 0) return;
 
             if (storage.height == 0) {
@@ -329,218 +414,10 @@ pub fn main() !void {
     defer s.deinit();
 
     var i: u32 = 0;
-    for (0..10) |j| {
+    for (0..20) |j| {
+        std.debug.print("\ninserting {}: {}\n", .{ i, j });
         try s.add(i, j);
         s.debugPrint();
         i = (i + 40507) % 256;
     }
 }
-
-// fn Internal(comptime T: type) type {
-//     // const MAX = ISIZE / 2;
-
-//     return struct {
-//         const Self = @This();
-
-//         keys: [ISIZE]u32 align(64),
-//         children: [ISIZE]usize,
-//         len: u32,
-
-//         fn create(alloc: std.mem.Allocator) !*Self {
-//             var node = try alloc.create(Self);
-//             node.keys = .{0} ** ISIZE;
-//             node.len = 0;
-//             node.children = .{null} ** ISIZE;
-//             return node;
-//         }
-
-//         fn destroy(node: *Self, alloc: std.mem.Allocator, height: i32) void {
-//             std.debug.assert(height > 0);
-//             for (node.children) |child| {
-//                 if (child == 0) continue;
-//                 if (height == 2) {
-//                     lptr(child).?.destroy(alloc);
-//                 } else {
-//                     iptr(child).?.destroy(alloc, height - 1);
-//                 }
-//             }
-//             alloc.destroy(node);
-//         }
-
-//         fn iptr(ptr: usize) ?*Self {
-//             return @ptrFromInt(ptr);
-//         }
-
-//         fn lptr(ptr: usize) ?*Leaf(T) {
-//             return @ptrFromInt(ptr);
-//         }
-//     };
-// }
-
-// comptime {
-//     if (ISIZE == 5) {
-//         std.debug.assert(@sizeOf(Internal(void)) == 0);
-//     }
-// }
-
-// fn Leaf(comptime T: type) type {
-//     // const MAX = LSIZE / 2;
-
-//     return struct {
-//         const Self = @This();
-
-//         keys: [LSIZE]u32 align(64),
-//         vals: [LSIZE]T,
-//         len: u32,
-
-//         prev: ?*Self,
-//         next: ?*Self,
-
-//         fn create(alloc: std.mem.Allocator) !*Self {
-//             var node = try alloc.create(Self);
-//             node.keys = .{0} ** LSIZE;
-//             node.len = 0;
-//             node.prev = null;
-//             node.next = null;
-//             return node;
-//         }
-
-//         fn destroy(node: *Self, alloc: std.mem.Allocator) void {
-//             alloc.destroy(node);
-//         }
-
-//         fn add(node: *Self, alloc: std.mem.Allocator, key: u32, val: T) !i32 {
-//             // find where into this node our data would fit
-//             var i: u32 = 0;
-//             while (i < node.len) : (i += 1) {
-//                 if (node.keys[i] >= key) break;
-//             }
-
-//             if (node.len + 1 < LSIZE) {
-//                 std.mem.copyBackwards(
-//                     u32,
-//                     node.keys[i + 1 .. node.len],
-//                     node.keys[i .. node.len - 1],
-//                 );
-//                 std.mem.copyBackwards(
-//                     u32,
-//                     node.keys[i + 1 .. node.len],
-//                     node.keys[i .. node.len - 1],
-//                 );
-
-//                 node.keys[i] = key;
-//                 node.vals[i] = val;
-//                 node.len += 1;
-//             }
-
-//             _ = alloc;
-//         }
-
-//         fn iptr(ptr: usize) ?*Internal(T) {
-//             return @ptrFromInt(ptr);
-//         }
-
-//         fn lptr(ptr: usize) ?*Self {
-//             return @ptrFromInt(ptr);
-//         }
-
-//         fn debugPrint(node: *Self) void {
-//             std.debug.print("{{ ", .{});
-//         }
-//     };
-// }
-
-// // NOTE I think add, del, get and and Iterator is all that we really need
-// fn Storage(comptime T: type) type {
-//     return struct {
-//         const Self = @This();
-
-//         const Iterator = struct {
-//             const KV = struct { key: u32, val: T };
-
-//             pub fn next() ?*KV {
-//                 @compileError("TODO");
-//             }
-//         };
-
-//         alloc: std.mem.Allocator,
-//         root: usize,
-//         height: i32,
-
-//         pub fn init(alloc: std.mem.Allocator) Self {
-//             return .{
-//                 .alloc = alloc,
-//                 .root = 0,
-//                 .height = 0,
-//             };
-//         }
-
-//         pub fn deinit(storage: *Self) void {
-//             if (storage.root != 0) {
-//                 if (storage.height == 0) {
-//                     lptr(storage.root).?.destroy(storage.alloc);
-//                 } else {
-//                     iptr(storage.root).?.destroy(storage.alloc, storage.height);
-//                 }
-//             }
-//             storage.* = undefined;
-//         }
-
-//         fn add(storage: *Self, key: u32, val: T) !void {
-//             std.debug.assert(storage.height >= 0);
-
-//             if (storage.root == 0) {
-//                 storage.root = @intFromPtr(try Leaf(T).create(storage.alloc));
-//                 storage.height += 1;
-//             }
-
-//             if (storage.height == 0) {
-//                 storage.height += try lptr(storage.root).?.add(std.mem.Allocator, key, val);
-//             } else {
-//                 //
-//             }
-
-//             std.debug.assert(storage.height > 0);
-//         }
-
-//         fn del(storage: *Self, key: u32) void {
-//             _ = storage;
-//             _ = key;
-//             @compileError("TODO");
-//         }
-
-//         fn get(storage: *Self, key: u32) ?*T {
-//             _ = storage;
-//             _ = key;
-//             @compileError("TODO");
-//         }
-
-//         fn iterator(storage: *Self) Iterator {
-//             _ = storage;
-//             @compileError("TODO");
-//         }
-
-//         fn iptr(ptr: usize) ?*Internal(T) {
-//             return @ptrFromInt(ptr);
-//         }
-
-//         fn lptr(ptr: usize) ?*Leaf(T) {
-//             return @ptrFromInt(ptr);
-//         }
-//     };
-// }
-
-// pub fn main() !void {
-//     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-//     defer _ = gpa.deinit();
-//     const alloc = gpa.allocator();
-
-//     var s = Storage(usize).init(alloc);
-//     defer s.deinit();
-
-//     var i: u32 = 0;
-//     for (0..100) |j| {
-//         try s.add(i, j);
-//         i = (i + 40507) % 65536;
-//     }
-// }
