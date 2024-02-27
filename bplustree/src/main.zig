@@ -125,14 +125,33 @@ pub fn Storage(
                             return .none; // early exit as insertion only affected this leaf
                         },
                         .move_prev => {
-                            @panic("TODO node add leaf move prev");
+                            if (i == 0) {
+                                // we have moved to a cousin
+                                std.debug.assert(node.prev != null);
+                                const prev = node.prev.?;
+                                std.debug.assert(prev.len >= 2);
+                                prev.keys[prev.len - 2] = lp(prev.children[prev.len - 1]).keys[0];
+                                node.keys[0] = lp(node.children[1]).keys[0];
+                            } else {
+                                node.keys[i - 1] = lp(node.children[i]).keys[0];
+                                node.keys[i] = lp(node.children[i + 1]).keys[0];
+                            }
+                            return .move_prev; // keep bubbling up
                         },
                         .move_next => {
-                            // move right can trigger more move rights
-                            for (i..node.len - 1) |j| {
-                                node.keys[j] = lp(node.children[j + 1]).keys[0];
+                            std.debug.print("{}\n", .{i});
+                            std.debug.print("{any}\n", .{node.children});
+                            if (i == NODE_SIZE - 1) {
+                                // note, move next to a cousin will insert into a smallest leaf
+                                // so updating the node keys here is not needed
+                                node.keys[i - 1] = lp(node.children[i]).keys[0];
+                            } else if (i == 0) {
+                                node.keys[i] = lp(node.children[i + 1]).keys[0];
+                            } else {
+                                node.keys[i - 1] = lp(node.children[i]).keys[0];
+                                node.keys[i] = lp(node.children[i + 1]).keys[0];
                             }
-                            return .none;
+                            return .move_next;
                         },
                         .split => {
                             // make space for the split
@@ -415,7 +434,6 @@ pub fn Storage(
             } else {
                 const effect = try np(storage.root).add(storage.alloc, storage.height, key, val);
                 switch (effect) {
-                    .none => {},
                     .split => {
                         const next = try np(storage.root).split(storage.alloc);
                         const root = try Node.create(storage.alloc);
@@ -427,7 +445,7 @@ pub fn Storage(
                         storage.root = @intFromPtr(root);
                         storage.height += 1;
                     },
-                    else => unreachable,
+                    else => {},
                 }
             }
         }
