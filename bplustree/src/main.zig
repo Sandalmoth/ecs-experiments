@@ -249,11 +249,11 @@ pub fn Storage(
                 };
 
                 @memcpy(
-                    result.next.keys[0 .. half - 1],
+                    @as([*]u32, @ptrCast(&result.next.keys[0])),
                     node.keys[half..NODE_SIZE],
                 );
                 @memcpy(
-                    result.next.children[0..half],
+                    @as([*]usize, @ptrCast(&result.next.children[0])),
                     node.children[half .. NODE_SIZE + 1],
                 );
                 node.len = half;
@@ -416,18 +416,23 @@ pub fn Storage(
                                     height - 1,
                                     np(node.children[i + 1]),
                                 );
-                                std.mem.copyForwards(
-                                    u32,
-                                    node.keys[i..node.len],
-                                    node.keys[i + 1 .. node.len + 1],
-                                );
                                 if (node.len + 1 < NODE_SIZE) {
+                                    std.mem.copyForwards(
+                                        u32,
+                                        node.keys[i..node.len],
+                                        node.keys[i + 1 .. node.len + 1],
+                                    );
                                     std.mem.copyForwards(
                                         T,
                                         node.children[i + 1 .. node.len + 1],
                                         node.children[i + 2 .. node.len + 2],
                                     );
                                 } else {
+                                    std.mem.copyForwards(
+                                        u32,
+                                        node.keys[i .. node.len - 1],
+                                        node.keys[i + 1 .. node.len],
+                                    );
                                     std.mem.copyForwards(
                                         T,
                                         node.children[i + 1 .. node.len],
@@ -444,10 +449,18 @@ pub fn Storage(
             }
 
             fn merge(node: *Node, alloc: std.mem.Allocator, height: u32, next: *Node) void {
-                const new_low = if (height == 1)
-                    lp(next.children[0]).keys[0]
-                else
-                    np(next.children[0]).keys[0];
+                // const new_low = if (height == 1)
+                //     lp(next.children[0]).keys[0]
+                // else
+                //     np(next.children[0]).keys[0];
+                const new_low = blk: {
+                    var h = height;
+                    var walk = @intFromPtr(next);
+                    while (h > 0) : (h -= 1) {
+                        walk = np(walk).children[0];
+                    }
+                    break :blk lp(walk).keys[0];
+                };
 
                 @memcpy(
                     node.keys[node.len .. node.len + next.len - 1],
@@ -538,11 +551,11 @@ pub fn Storage(
 
                 const half = (LEAF_SIZE + 1) / 2;
                 @memcpy(
-                    next.keys[0 .. half + 1],
+                    @as([*]u32, @ptrCast(&next.keys[0])),
                     leaf.keys[half .. LEAF_SIZE + 1],
                 );
                 @memcpy(
-                    next.vals[0 .. half + 1],
+                    @as([*]T, @ptrCast(&next.vals[0])),
                     leaf.vals[half .. LEAF_SIZE + 1],
                 );
                 leaf.len = half;
@@ -746,22 +759,45 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var s = Storage(usize, 3, 4).init(alloc);
-    defer s.deinit();
+    {
+        var s = Storage(usize, 3, 4).init(alloc);
+        defer s.deinit();
 
-    var i: u32 = 0;
-    for (0..20) |j| {
-        std.debug.print("\ninserting {}: {}\n", .{ i, j });
-        try s.add(i, j);
-        s.debugPrint();
-        i = (i + 40507) % 256;
+        var i: u32 = 0;
+        for (0..100) |j| {
+            std.debug.print("\ninserting {}: {}\n", .{ i, j });
+            try s.add(i, j);
+            s.debugPrint();
+            i = (i + 40507) % 256;
+        }
+
+        i = 0;
+        for (0..100) |j| {
+            std.debug.print("\ndeleting {}: {}\n", .{ i, j });
+            s.del(i);
+            s.debugPrint();
+            i = (i + 40507) % 256;
+        }
     }
 
-    i = 0;
-    for (0..20) |j| {
-        std.debug.print("\ndeleting {}: {}\n", .{ i, j });
-        s.del(i);
-        s.debugPrint();
-        i = (i + 40507) % 256;
+    {
+        var s = Storage(usize, 4, 5).init(alloc);
+        defer s.deinit();
+
+        var i: u32 = 0;
+        for (0..100) |j| {
+            std.debug.print("\ninserting {}: {}\n", .{ i, j });
+            try s.add(i, j);
+            s.debugPrint();
+            i = (i + 40507) % 256;
+        }
+
+        i = 0;
+        for (0..100) |j| {
+            std.debug.print("\ndeleting {}: {}\n", .{ i, j });
+            s.del(i);
+            s.debugPrint();
+            i = (i + 40507) % 256;
+        }
     }
 }
