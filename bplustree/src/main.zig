@@ -268,8 +268,6 @@ pub fn Storage(
                 // so equal elements should return the next index, rather than their own
                 const i = upperBound(node.keys[0 .. node.len - 1], key);
 
-                std.debug.print("at start of node.del {}\n", .{height});
-
                 if (height == 1) {
                     const underflow = lp(node.children[i]).del(key);
                     if (underflow) {
@@ -328,13 +326,11 @@ pub fn Storage(
                                 lp(node.children[i]).len + lp(node.children[i + 1]).len <= LEAF_SIZE)
                             {
                                 // merge with right
-                                std.debug.print("{} {any} {} #\n", .{ i, node.keys, node.len });
                                 // use this node as the base, which deletes the next one
                                 lp(node.children[i]).merge(
                                     alloc,
                                     lp(node.children[i + 1]),
                                 );
-                                std.debug.print("{} {any} {} #\n", .{ i, node.keys, node.len });
                                 if (i == 0) {
                                     std.mem.copyForwards(
                                         u32,
@@ -348,8 +344,6 @@ pub fn Storage(
                                         node.keys[i..node.len],
                                     );
                                 }
-                                std.debug.print("{} {any} {} #\n", .{ i, node.keys, node.len });
-                                std.debug.print("{} {any} {} #\n", .{ i, node.children, node.len });
                                 if (node.len + 1 < NODE_SIZE) {
                                     std.mem.copyForwards(
                                         T,
@@ -363,7 +357,6 @@ pub fn Storage(
                                         node.children[i + 2 .. node.len + 1],
                                     );
                                 }
-                                std.debug.print("{} {any} {} #\n", .{ i, node.children, node.len });
                                 node.len -= 1;
                             }
                         }
@@ -372,14 +365,8 @@ pub fn Storage(
                     }
                 } else {
                     const underflow = np(node.children[i]).del(alloc, height - 1, key);
-                    std.debug.print("underflow is {}\n", .{underflow});
                     if (underflow) {
-                        node._debugPrint(height, 0);
-
-                        std.debug.print("{} {}\n", .{ i, node.len });
-
                         if (np(node.children[i]).len == 0) {
-                            std.debug.print("less than 0\n", .{});
                             np(node.children[i]).destroy(alloc, height - 1);
 
                             if (i == 0) {
@@ -402,18 +389,14 @@ pub fn Storage(
                             );
                             node.len -= 1;
                         } else {
-                            std.debug.print("try merge\n", .{});
-
                             if (i > 0 and
                                 np(node.children[i]).len + np(node.children[i - 1]).len <= NODE_SIZE)
                             {
-                                std.debug.print("merge left\n", .{});
                                 np(node.children[i - 1]).merge(
                                     alloc,
                                     height - 1,
                                     np(node.children[i]),
                                 );
-                                np(node.children[i - 1])._debugPrint(height - 1, 0);
                                 std.mem.copyForwards(
                                     u32,
                                     node.keys[i - 1 .. node.len - 1],
@@ -428,7 +411,6 @@ pub fn Storage(
                             } else if (i < node.len - 1 and
                                 np(node.children[i]).len + np(node.children[i + 1]).len <= NODE_SIZE)
                             {
-                                std.debug.print("merge right\n", .{});
                                 np(node.children[i]).merge(
                                     alloc,
                                     height - 1,
@@ -458,9 +440,6 @@ pub fn Storage(
                     }
                 }
 
-                std.debug.print("at end of node.del {}\n", .{height});
-                node._debugPrint(height, 0);
-                std.debug.print("{} {} {}\n", .{ node.len, (NODE_SIZE + 1) / 2, node.len < (NODE_SIZE + 1) / 2 });
                 return node.len < (NODE_SIZE + 1) / 2;
             }
 
@@ -469,31 +448,18 @@ pub fn Storage(
                     lp(next.children[0]).keys[0]
                 else
                     np(next.children[0]).keys[0];
-                std.debug.print("{} {}\n", .{ height, new_low });
 
-                std.debug.print("merging\n", .{});
-                node._debugPrint(height, 0);
-                std.debug.print("with\n", .{});
-                next._debugPrint(height, 0);
-                std.debug.print("{any}\n", .{node.keys});
-                std.debug.print("{any}\n", .{next.keys});
                 @memcpy(
                     node.keys[node.len .. node.len + next.len - 1],
                     next.keys[0 .. next.len - 1],
                 );
-                std.debug.print("{any}\n", .{node.keys});
-                std.debug.print("{any}\n", .{next.keys});
                 node.keys[node.len - 1] = new_low;
-                std.debug.print("{any}\n", .{node.keys});
-                std.debug.print("{any}\n", .{next.keys});
                 @memcpy(
                     node.children[node.len .. node.len + next.len],
                     next.children[0..next.len],
                 );
                 node.len += next.len;
                 next.len = 0;
-                std.debug.print("created\n", .{});
-                node._debugPrint(height, 0);
 
                 next.destroy(alloc, height);
             }
@@ -590,8 +556,6 @@ pub fn Storage(
             fn del(leaf: *Leaf, key: u32) bool {
                 const i = lowerBound(leaf.keys[0..leaf.len], key);
 
-                std.debug.print("{} {any} {}\n", .{ i, leaf.keys, leaf.len });
-
                 std.debug.assert(leaf.keys[i] == key);
                 std.debug.assert(i < leaf.len);
                 std.debug.assert(leaf.len <= LEAF_SIZE);
@@ -613,10 +577,6 @@ pub fn Storage(
 
             fn merge(leaf: *Leaf, alloc: std.mem.Allocator, next: *Leaf) void {
                 std.debug.assert(leaf.keys[leaf.len - 1] < next.keys[0]);
-                std.debug.print("merging\n", .{});
-                leaf._debugPrint(0);
-                std.debug.print("with\n", .{});
-                next._debugPrint(0);
                 @memcpy(
                     leaf.keys[leaf.len .. leaf.len + next.len],
                     next.keys[0..next.len],
@@ -630,8 +590,6 @@ pub fn Storage(
                 if (next.next != null) {
                     next.next.?.prev = leaf;
                 }
-                std.debug.print("created\n", .{});
-                leaf._debugPrint(0);
 
                 next.destroy(alloc);
             }
@@ -728,7 +686,6 @@ pub fn Storage(
             } else {
                 const underflow = np(storage.root).del(storage.alloc, storage.height, key);
                 if (underflow) {
-                    np(storage.root)._debugPrint(storage.height, 0);
 
                     // special condition for root node, some underflow is allowed
                     if (np(storage.root).len < 2) {
