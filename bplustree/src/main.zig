@@ -79,20 +79,11 @@ pub fn Storage(
         const Self = @This();
 
         // message to caller for dealing with the consequences of inserting into a node or leaf
-        const InsEff = enum {
-            none,
-            move_prev,
-            move_next,
-            split,
-        };
 
         const Node = struct {
             // leave space for one extra entry for easy inserting
             keys: [NODE_SIZE]u32 align(64),
             children: [NODE_SIZE + 1]usize, // ?*Node or ?*Leaf
-
-            prev: ?*Node,
-            next: ?*Node,
 
             len: u32,
 
@@ -100,158 +91,116 @@ pub fn Storage(
                 var node = try alloc.create(Node);
                 node.keys = undefined;
                 node.children = undefined;
-                node.prev = null;
-                node.next = null;
                 node.len = 0;
                 return node;
             }
 
             fn destroy(node: *Node, alloc: std.mem.Allocator, height: u32) void {
-                _ = node;
-                _ = alloc;
-                _ = height;
+                if (height == 1) {
+                    for (node.children[0..node.len]) |child| {
+                        std.debug.assert(child != 0);
+                        lp(child).destroy(alloc);
+                    }
+                } else {
+                    for (node.children[0..node.len]) |child| {
+                        std.debug.assert(child != 0);
+                        np(child).destroy(alloc, height - 1);
+                    }
+                }
+                alloc.destroy(node);
             }
 
-            fn add(node: *Node, alloc: std.mem.Allocator, height: u32, key: u32, val: T) !InsEff {
+            fn add(node: *Node, alloc: std.mem.Allocator, height: u32, key: u32, val: T) !bool {
                 const i = lowerBound(node.keys[0 .. node.len - 1], key);
 
                 if (height == 1) {
-                    const effect = lp(node.children[i]).add(key, val);
-                    switch (effect) {
-                        .none => {
-                            if (i > 0) {
-                                node.keys[i - 1] = lp(node.children[i]).keys[0];
-                            }
-                            return .none; // early exit as insertion only affected this leaf
-                        },
-                        .move_prev => {
-                            if (i == 0) {
-                                // we have moved to a cousin
-                                std.debug.assert(node.prev != null);
-                                const prev = node.prev.?;
-                                std.debug.assert(prev.len >= 2);
-                                prev.keys[prev.len - 2] = lp(prev.children[prev.len - 1]).keys[0];
-                                node.keys[0] = lp(node.children[1]).keys[0];
-                            } else {
-                                node.keys[i - 1] = lp(node.children[i]).keys[0];
-                                node.keys[i] = lp(node.children[i + 1]).keys[0];
-                            }
-                            return .move_prev; // keep bubbling up
-                        },
-                        .move_next => {
-                            std.debug.print("{}\n", .{i});
-                            std.debug.print("{any}\n", .{node.children});
-                            if (i == NODE_SIZE - 1) {
-                                // note, move next to a cousin will insert into a smallest leaf
-                                // so updating the node keys here is not needed
-                                node.keys[i - 1] = lp(node.children[i]).keys[0];
-                            } else if (i == 0) {
-                                node.keys[i] = lp(node.children[i + 1]).keys[0];
-                            } else {
-                                node.keys[i - 1] = lp(node.children[i]).keys[0];
-                                node.keys[i] = lp(node.children[i + 1]).keys[0];
-                            }
-                            return .move_next;
-                        },
-                        .split => {
-                            // make space for the split
-                            if (i > 0) {
-                                std.mem.copyBackwards(
-                                    u32,
-                                    node.keys[i..node.len],
-                                    node.keys[i - 1 .. node.len - 1],
-                                );
-                            } else {
-                                std.mem.copyBackwards(
-                                    u32,
-                                    node.keys[i + 1 .. node.len + 1],
-                                    node.keys[i..node.len],
-                                );
-                            }
+                    const overflow = lp(node.children[i]).add(key, val);
+                    if (overflow) {
+                        // make space for the split
+                        if (i == 0) {
                             std.mem.copyBackwards(
-                                usize,
-                                node.children[i + 1 .. node.len + 1],
-                                node.children[i..node.len],
+                                u32,
+                                node.keys[i + 1 .. node.len],
+                                node.keys[i .. node.len - 1],
                             );
+                        } else {
+                            std.mem.copyBackwards(
+                                u32,
+                                node.keys[i..node.len],
+                                node.keys[i - 1 .. node.len - 1],
+                            );
+                        }
+                        std.mem.copyBackwards(
+                            usize,
+                            node.children[i + 1 .. node.len + 1],
+                            node.children[i..node.len],
+                        );
 
-                            const next = try lp(node.children[i]).split(alloc);
-                            node.children[i + 1] = @intFromPtr(next);
-                            node.keys[i] = next.keys[0];
-                            node.len += 1;
-                        },
+                        const next = try lp(node.children[i]).split(alloc);
+                        node.children[i + 1] = @intFromPtr(next);
+                        node.keys[i] = next.keys[0];
+                        node.len += 1;
                     }
                 } else {
-                    const effect = try np(node.children[i]).add(alloc, height - 1, key, val);
-                    switch (effect) {
-                        .none => {
-                            if (i > 0) {
-                                node.keys[i - 1] = np(node.children[i]).keys[0];
-                            }
-                            return .none; // early exit, no rearranging happening
-                        },
-                        .move_prev => {
-                            @panic("TODO node add node move prev");
-                        },
-                        .move_next => {
-                            @panic("TODO node add node move next");
-                        },
-                        .split => {
-                            @panic("TODO node add node split");
-                        },
+                    const overflow = try np(node.children[i]).add(alloc, height - 1, key, val);
+                    if (overflow) {
+                        // make space for the split
+                        if (i == 0) {
+                            std.mem.copyBackwards(
+                                u32,
+                                node.keys[i + 1 .. node.len],
+                                node.keys[i .. node.len - 1],
+                            );
+                        } else {
+                            std.mem.copyBackwards(
+                                u32,
+                                node.keys[i..node.len],
+                                node.keys[i - 1 .. node.len - 1],
+                            );
+                        }
+                        std.mem.copyBackwards(
+                            usize,
+                            node.children[i + 1 .. node.len + 1],
+                            node.children[i..node.len],
+                        );
+
+                        const result = try np(node.children[i]).split(alloc);
+                        node.children[i + 1] = @intFromPtr(result.next);
+                        node.keys[i] = result.pivot;
+                        node.len += 1;
                     }
                 }
 
-                if (node.len <= NODE_SIZE) {
-                    return .none;
-                }
-
-                // out of space, do something about it!
-                // try to move our lowest element to the left
-                if (node.prev != null and node.prev.?.len < NODE_SIZE) {
-                    @panic("TODO node add move next");
-                    // const displaced_child = node.children[0];
-                    // std.mem.copyForwards(u32, node.keys[0..], node.keys[1..node.len]);
-                    // std.mem.copyForwards(T, node.children[0..], node.children[1..node.len]);
-                    // node.len -= 1;
-
-                    // // node.prev.?.keys[node.prev.?.len - 1] = node.children[0];
-                    // node.prev.?.children[node.prev.?.len] = displaced_child;
-                    // node.prev.?.len += 1;
-
-                    // return .move_prev;
-                }
-                // try to move our highest element to the right
-                if (node.next != null and node.next.?.len < NODE_SIZE) {
-                    @panic("TODO node add move next");
-                    // const displaced_child = node.children[node.len - 1];
-                    // node.len -= 1;
-
-                    // return .move_next;
-                }
-
-                return .split;
+                return (node.len > NODE_SIZE);
             }
 
-            /// splits node into two, and returns a pointer to next one in order (new one)
-            fn split(node: *Node, alloc: std.mem.Allocator) !*Node {
-                const next = try Node.create(alloc);
-
-                const keyhalf = NODE_SIZE / 2;
+            // we need to return both the new node, but also the key that we eliminate
+            // as the new node doesnt' track the key for it's lowest child
+            // it would otherwise be lost
+            const SplitResult = struct {
+                next: *Node,
+                pivot: u32,
+            };
+            fn split(node: *Node, alloc: std.mem.Allocator) !SplitResult {
                 const half = (NODE_SIZE + 1) / 2;
+
+                const result = .{
+                    .next = try Node.create(alloc),
+                    .pivot = node.keys[half - 1],
+                };
+
                 @memcpy(
-                    next.keys[0..keyhalf],
-                    node.keys[keyhalf .. 2 * keyhalf],
+                    result.next.keys[0 .. half - 1],
+                    node.keys[half..NODE_SIZE],
                 );
                 @memcpy(
-                    next.children[0..half],
+                    result.next.children[0..half],
                     node.children[half .. NODE_SIZE + 1],
                 );
                 node.len = half;
-                next.len = NODE_SIZE + 1 - half;
-                node.next = next;
-                next.prev = node;
+                result.next.len = NODE_SIZE + 1 - half;
 
-                return next;
+                return result;
             }
 
             fn _debugPrint(node: *Node, height: u32) void {
@@ -295,11 +244,10 @@ pub fn Storage(
             }
 
             fn destroy(leaf: *Leaf, alloc: std.mem.Allocator) void {
-                _ = leaf;
-                _ = alloc;
+                alloc.destroy(leaf);
             }
 
-            fn add(leaf: *Leaf, key: u32, val: T) InsEff {
+            fn add(leaf: *Leaf, key: u32, val: T) bool {
                 const i = lowerBound(leaf.keys[0..leaf.len], key);
 
                 if (i < leaf.len) {
@@ -318,33 +266,7 @@ pub fn Storage(
                 leaf.vals[i] = val;
                 leaf.len += 1;
 
-                if (leaf.len <= LEAF_SIZE) {
-                    return .none;
-                }
-
-                // out of space, do something about it!
-                // try to move our lowest element to the left
-                if (leaf.prev != null and leaf.prev.?.len < LEAF_SIZE) {
-                    const displaced_key = leaf.keys[0];
-                    const displaced_val = leaf.vals[0];
-                    std.mem.copyForwards(u32, leaf.keys[0..], leaf.keys[1..leaf.len]);
-                    std.mem.copyForwards(T, leaf.vals[0..], leaf.vals[1..leaf.len]);
-                    leaf.len -= 1;
-                    const effect = leaf.prev.?.add(displaced_key, displaced_val);
-                    std.debug.assert(effect == .none);
-                    return .move_prev;
-                }
-                // try to move our highest element to the right
-                if (leaf.next != null and leaf.next.?.len < LEAF_SIZE) {
-                    leaf.len -= 1;
-                    const displaced_key = leaf.keys[leaf.len];
-                    const displaced_val = leaf.vals[leaf.len];
-                    const effect = leaf.next.?.add(displaced_key, displaced_val);
-                    std.debug.assert(effect == .none);
-                    return .move_next;
-                }
-
-                return .split;
+                return (leaf.len > LEAF_SIZE);
             }
 
             /// splits leaf into two, and returns a pointer to next one in order (new one)
@@ -415,37 +337,30 @@ pub fn Storage(
             }
 
             if (storage.height == 0) {
-                const effect = lp(storage.root).add(key, val);
-                switch (effect) {
-                    .none => {}, // no response needed
-                    .split => {
-                        const next = try lp(storage.root).split(storage.alloc);
-                        const root = try Node.create(storage.alloc);
-                        root.children[0] = storage.root;
-                        root.children[1] = @intFromPtr(next);
-                        root.keys[0] = next.keys[0];
-                        root.len = 2;
+                const overflow = lp(storage.root).add(key, val);
+                if (overflow) {
+                    const next = try lp(storage.root).split(storage.alloc);
+                    const root = try Node.create(storage.alloc);
+                    root.children[0] = storage.root;
+                    root.children[1] = @intFromPtr(next);
+                    root.keys[0] = next.keys[0];
+                    root.len = 2;
 
-                        storage.root = @intFromPtr(root);
-                        storage.height += 1;
-                    },
-                    else => unreachable,
+                    storage.root = @intFromPtr(root);
+                    storage.height += 1;
                 }
             } else {
-                const effect = try np(storage.root).add(storage.alloc, storage.height, key, val);
-                switch (effect) {
-                    .split => {
-                        const next = try np(storage.root).split(storage.alloc);
-                        const root = try Node.create(storage.alloc);
-                        root.children[0] = storage.root;
-                        root.children[1] = @intFromPtr(next);
-                        root.keys[0] = next.keys[0];
-                        root.len = 2;
+                const overflow = try np(storage.root).add(storage.alloc, storage.height, key, val);
+                if (overflow) {
+                    const result = try np(storage.root).split(storage.alloc);
+                    const root = try Node.create(storage.alloc);
+                    root.children[0] = storage.root;
+                    root.children[1] = @intFromPtr(result.next);
+                    root.keys[0] = result.pivot;
+                    root.len = 2;
 
-                        storage.root = @intFromPtr(root);
-                        storage.height += 1;
-                    },
-                    else => {},
+                    storage.root = @intFromPtr(root);
+                    storage.height += 1;
                 }
             }
         }
@@ -509,358 +424,4 @@ pub fn main() !void {
         s.debugPrint();
         i = (i + 40507) % 256;
     }
-}
-
-// legacy
-
-pub fn OLDStorage(
-    comptime T: type,
-    comptime NODE_SIZE: comptime_int, // max number of children for an internal node
-    comptime LEAF_SIZE: comptime_int, // max number of entries in a leaf node
-) type {
-    return struct {
-        const Self = @This();
-
-        const Node = struct {
-            keys: [NODE_SIZE]u32 align(64),
-            children: usize, // ?*NodePage or ?*LeafPage
-            len: u32,
-
-            fn init() Node {
-                return .{
-                    .keys = undefined,
-                    .children = 0,
-                    .len = 0,
-                };
-            }
-
-            fn destroy(node: *Node, alloc: std.mem.Allocator, height: u32) void {
-                std.debug.assert(height > 0);
-                std.debug.assert(node.len > 0);
-                if (height == 1) {
-                    alloc.destroy(lp(node.children));
-                } else {
-                    for (0..node.len) |i| {
-                        np(node.children).nodes[i].destroy(alloc, height - 1);
-                    }
-                    alloc.destroy(np(node.children));
-                }
-            }
-
-            fn add(node: *Node, alloc: std.mem.Allocator, height: u32, key: u32, val: T) !bool {
-                std.debug.assert(height > 0);
-                // find where into this node our data would fit
-                const i = lowerBound(node.keys[0 .. node.len - 1], key);
-
-                if (height == 1) {
-                    const split = lp(node.children).leaves[i].add(key, val);
-                    if (split) {
-                        // we need to make room in the LeafNode child array for the expansion
-                        // then split the full node into that new space
-                        // reconnect all the pointers
-                        // and finally, update our array of keys
-
-                        std.mem.copyBackwards(
-                            Leaf,
-                            lp(node.children).leaves[i + 1 .. node.len + 1],
-                            lp(node.children).leaves[i..node.len],
-                        );
-                        std.mem.copyBackwards(
-                            u32,
-                            node.keys[i..node.len],
-                            node.keys[i - 1 .. node.len - 1],
-                        );
-
-                        lp(node.children).leaves[i + 1] = Leaf.init();
-                        const half = (LEAF_SIZE + 1) / 2;
-                        @memcpy(
-                            lp(node.children).leaves[i + 1].keys[0 .. half + 1],
-                            lp(node.children).leaves[i].keys[half .. LEAF_SIZE + 1],
-                        );
-                        @memcpy(
-                            lp(node.children).leaves[i + 1].vals[0 .. half + 1],
-                            lp(node.children).leaves[i].vals[half .. LEAF_SIZE + 1],
-                        );
-                        lp(node.children).leaves[i].len = half;
-                        lp(node.children).leaves[i + 1].len = LEAF_SIZE + 1 - half;
-                        lp(node.children).leaves[i].next = &lp(node.children).leaves[i + 1];
-                        lp(node.children).leaves[i + 1].prev = &lp(node.children).leaves[i];
-
-                        if (i > 0) {
-                            lp(node.children).leaves[i].prev = &lp(node.children).leaves[i - 1];
-                            lp(node.children).leaves[i - 1].next = &lp(node.children).leaves[i];
-                        }
-                        if (i < NODE_SIZE - 1) {
-                            lp(node.children).leaves[i + 1].next = &lp(node.children).leaves[i + 2];
-                            lp(node.children).leaves[i + 2].prev = &lp(node.children).leaves[i + 1];
-                        }
-
-                        if (i > 0) {
-                            node.keys[i - 1] = lp(node.children).leaves[i].keys[0];
-                        }
-                        node.keys[i] = lp(node.children).leaves[i + 1].keys[0];
-                        node.len += 1;
-                    } else {
-                        if (i > 0) {
-                            node.keys[i - 1] = lp(node.children).leaves[i].keys[0];
-                        }
-                        node.keys[i] = lp(node.children).leaves[i + 1].keys[0];
-                    }
-                } else {
-                    @panic("TODO: add to a node with node children");
-                }
-                _ = alloc;
-
-                return node.len > NODE_SIZE;
-            }
-
-            fn _debugPrint(node: *Node, height: u32) void {
-                std.debug.assert(height > 0);
-                std.debug.print("  {} [ ", .{node.len});
-                for (0..node.len - 1) |i| {
-                    std.debug.print("{} ", .{node.keys[i]});
-                }
-                std.debug.print("] at height {} \n", .{height});
-
-                if (height == 1) {
-                    for (0..node.len) |i| {
-                        lp(node.children).leaves[i]._debugPrint();
-                    }
-                } else {
-                    for (0..node.len) |i| {
-                        np(node.children).nodes[i]._debugPrint(height - 1);
-                    }
-                }
-            }
-        };
-
-        // leave space for one extra node if we need to split during insertion
-        const NodePage = struct { nodes: [NODE_SIZE + 1]Node };
-
-        const Leaf = struct {
-            // leave space for one extra entry for easy inserting
-            keys: [LEAF_SIZE + 1]u32 align(64),
-            vals: [LEAF_SIZE + 1]T,
-            len: u32,
-
-            prev: ?*@This(),
-            next: ?*@This(),
-
-            fn init() Leaf {
-                return .{
-                    .keys = undefined,
-                    .vals = undefined,
-                    .len = 0,
-                    .prev = null,
-                    .next = null,
-                };
-            }
-
-            fn add(leaf: *Leaf, key: u32, val: T) bool {
-                // find where into this node our data would fit
-                const i = lowerBound(leaf.keys[0..leaf.len], key);
-
-                // there is always space to insert
-                // (and then we deal with the consequences later)
-                if (i < leaf.len) {
-                    std.mem.copyBackwards(
-                        u32,
-                        leaf.keys[i + 1 .. leaf.len + 1],
-                        leaf.keys[i..leaf.len],
-                    );
-                    std.mem.copyBackwards(
-                        T,
-                        leaf.vals[i + 1 .. leaf.len + 1],
-                        leaf.vals[i..leaf.len],
-                    );
-                }
-                leaf.keys[i] = key;
-                leaf.vals[i] = val;
-                leaf.len += 1;
-
-                if (leaf.len <= LEAF_SIZE) {
-                    return false;
-                }
-
-                // out of space, do something about it!
-                // try to move our lowest element to the left
-                if (leaf.prev != null and leaf.prev.?.len < LEAF_SIZE) {
-                    const displaced_key = leaf.keys[0];
-                    const displaced_val = leaf.vals[0];
-                    std.mem.copyForwards(u32, leaf.keys[0..], leaf.keys[1..leaf.len]);
-                    std.mem.copyForwards(T, leaf.vals[0..], leaf.vals[1..leaf.len]);
-                    leaf.len -= 1;
-                    return @call(
-                        .always_tail,
-                        Leaf.add,
-                        .{ leaf.prev.?, displaced_key, displaced_val },
-                    );
-                }
-                // try to move our highest element to the right
-                if (leaf.next != null and leaf.next.?.len < LEAF_SIZE) {
-                    leaf.len -= 1;
-                    const displaced_key = leaf.keys[leaf.len];
-                    const displaced_val = leaf.vals[leaf.len];
-                    return @call(
-                        .always_tail,
-                        Leaf.add,
-                        .{ leaf.next.?, displaced_key, displaced_val },
-                    );
-                }
-
-                // we need to split, but we can't do it ourselves
-                // so return 1 and let the caller deal with it
-                return true;
-            }
-
-            fn _debugPrint(leaf: *Leaf) void {
-                std.debug.print("  {} {{ ", .{leaf.len});
-                for (0..leaf.len) |i| {
-                    std.debug.print("{}: {}, ", .{ leaf.keys[i], leaf.vals[i] });
-                }
-                std.debug.print("}}\n", .{});
-            }
-        };
-
-        // leave space for one extra leaf if we need to split during insertion
-        const LeafPage = struct { leaves: [NODE_SIZE + 1]Leaf };
-
-        const Iterator = struct {
-            const KV = struct { key: u32, val: T };
-
-            pub fn next() ?*KV {
-                @compileError("TODO");
-            }
-        };
-
-        alloc: std.mem.Allocator,
-        root: usize, // ?*NodePage or ?*LeafPage
-        height: u32, // a height of 0 -> only a leaf
-
-        // Whether the root is a NodePage or a LeafPage depends on the height
-        // we waste stome space by using a page for the root
-        // since it means that when we need to grow the tree there's no need to move anything
-
-        pub fn init(alloc: std.mem.Allocator) Self {
-            return .{
-                .alloc = alloc,
-                .root = 0,
-                .height = 0,
-            };
-        }
-
-        pub fn deinit(storage: *Self) void {
-            if (storage.root != 0) {
-                if (storage.height == 0) {
-                    storage.alloc.destroy(lp(storage.root));
-                } else {
-                    np(storage.root).nodes[0].destroy(storage.alloc, storage.height);
-                    storage.alloc.destroy(np(storage.root));
-                }
-            }
-            storage.* = undefined;
-        }
-
-        fn add(storage: *Self, key: u32, val: T) !void {
-            if (storage.root == 0) {
-                const root = try storage.alloc.create(LeafPage);
-                root.leaves[0] = Leaf.init();
-                storage.root = @intFromPtr(root);
-            }
-
-            if (storage.height == 0) {
-                const split = lp(storage.root).leaves[0].add(key, val);
-                if (split) {
-                    // note the hardcoded (0, 1) split, since this only happens in one case
-                    // split the leaves
-                    lp(storage.root).leaves[1] = Leaf.init();
-                    const half = (LEAF_SIZE + 1) / 2;
-                    @memcpy(
-                        lp(storage.root).leaves[1].keys[0 .. half + 1],
-                        lp(storage.root).leaves[0].keys[half .. LEAF_SIZE + 1],
-                    );
-                    @memcpy(
-                        lp(storage.root).leaves[1].vals[0 .. half + 1],
-                        lp(storage.root).leaves[0].vals[half .. LEAF_SIZE + 1],
-                    );
-                    lp(storage.root).leaves[0].len = half;
-                    lp(storage.root).leaves[1].len = LEAF_SIZE + 1 - half;
-                    lp(storage.root).leaves[0].next = &lp(storage.root).leaves[1];
-                    lp(storage.root).leaves[1].prev = &lp(storage.root).leaves[0];
-
-                    // and then make a new node that gets to be the root
-                    const root = try storage.alloc.create(NodePage);
-                    root.nodes[0] = Node.init();
-                    root.nodes[0].children = storage.root;
-                    root.nodes[0].keys[0] = lp(storage.root).leaves[1].keys[0];
-                    root.nodes[0].len = 2;
-
-                    storage.root = @intFromPtr(root);
-                    storage.height += 1;
-                }
-            } else {
-                const split = try np(
-                    storage.root,
-                ).nodes[0].add(storage.alloc, storage.height, key, val);
-                if (split) {
-                    // note the hardcoded (0, 1) split, since this only happens in one case
-                    np(storage.root).nodes[1] = Node.init();
-                    const half = (NODE_SIZE + 1) / 2;
-                    @memcpy( // MIGHT BE WRONG?
-                        np(storage.root).nodes[1].keys[0 .. half - 1],
-                        np(storage.root).nodes[0].keys[half..NODE_SIZE],
-                    );
-                    np(storage.root).nodes[0].len = half;
-                    np(storage.root).nodes[1].len = NODE_SIZE + 1 - half;
-
-                    const root = try storage.alloc.create(NodePage);
-                    root.nodes[0] = Node.init();
-                    root.nodes[0].children = storage.root;
-                    root.nodes[0].keys[0] = np(storage.root).nodes[1].keys[0];
-                    root.nodes[0].len = 2;
-
-                    storage.root = @intFromPtr(root);
-                    storage.height += 1;
-                }
-            }
-        }
-
-        fn del(storage: *Self, key: u32) void {
-            _ = key;
-            std.debug.assert(storage.height >= 0);
-            @compileError("TODO");
-        }
-
-        fn get(storage: *Self, key: u32) ?*T {
-            _ = storage;
-            _ = key;
-            @compileError("TODO");
-        }
-
-        fn iterator(storage: *Self) Iterator {
-            _ = storage;
-            @compileError("TODO");
-        }
-
-        fn np(ptr: usize) *NodePage {
-            std.debug.assert(ptr != 0);
-            return @ptrFromInt(ptr);
-        }
-
-        fn lp(ptr: usize) *LeafPage {
-            std.debug.assert(ptr != 0);
-            return @ptrFromInt(ptr);
-        }
-
-        fn debugPrint(storage: *Self) void {
-            std.debug.print("Storage <{s}> \n", .{@typeName(T)});
-            if (storage.root == 0) return;
-
-            if (storage.height == 0) {
-                lp(storage.root).leaves[0]._debugPrint();
-            } else {
-                np(storage.root).nodes[0]._debugPrint(storage.height);
-            }
-        }
-    };
 }
