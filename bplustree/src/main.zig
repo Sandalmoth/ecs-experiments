@@ -120,8 +120,8 @@ pub fn Storage(
                         if (i == 0) {
                             std.mem.copyBackwards(
                                 u32,
-                                node.keys[i + 1 .. node.len],
-                                node.keys[i .. node.len - 1],
+                                node.keys[1..node.len],
+                                node.keys[0 .. node.len - 1],
                             );
                         } else {
                             std.mem.copyBackwards(
@@ -148,8 +148,8 @@ pub fn Storage(
                         if (i == 0) {
                             std.mem.copyBackwards(
                                 u32,
-                                node.keys[i + 1 .. node.len],
-                                node.keys[i .. node.len - 1],
+                                node.keys[1..node.len],
+                                node.keys[0 .. node.len - 1],
                             );
                         } else {
                             std.mem.copyBackwards(
@@ -203,9 +203,11 @@ pub fn Storage(
                 return result;
             }
 
-            fn _debugPrint(node: *Node, height: u32) void {
+            fn _debugPrint(node: *Node, height: u32, depth: u32) void {
                 std.debug.assert(height > 0);
-                std.debug.print(" {}   [ ", .{node.len});
+                for (0..depth) |_| std.debug.print("  ", .{});
+
+                std.debug.print(" {} [ ", .{node.len});
                 for (0..node.len - 1) |i| {
                     std.debug.print("{} ", .{node.keys[i]});
                 }
@@ -213,11 +215,11 @@ pub fn Storage(
 
                 if (height == 1) {
                     for (0..node.len) |i| {
-                        lp(node.children[i])._debugPrint();
+                        lp(node.children[i])._debugPrint(depth + 1);
                     }
                 } else {
                     for (0..node.len) |i| {
-                        np(node.children[i])._debugPrint(height - 1);
+                        np(node.children[i])._debugPrint(height - 1, depth + 1);
                     }
                 }
             }
@@ -290,8 +292,10 @@ pub fn Storage(
                 return next;
             }
 
-            fn _debugPrint(leaf: *Leaf) void {
-                std.debug.print("   {} {{ ", .{leaf.len});
+            fn _debugPrint(leaf: *Leaf, depth: u32) void {
+                for (0..depth) |_| std.debug.print("  ", .{});
+
+                std.debug.print(" {} {{ ", .{leaf.len});
                 for (0..leaf.len) |i| {
                     std.debug.print("{}: {}, ", .{ leaf.keys[i], leaf.vals[i] });
                 }
@@ -401,9 +405,9 @@ pub fn Storage(
             if (storage.root == 0) return;
 
             if (storage.height == 0) {
-                lp(storage.root)._debugPrint();
+                lp(storage.root)._debugPrint(0);
             } else {
-                np(storage.root)._debugPrint(storage.height);
+                np(storage.root)._debugPrint(storage.height, 0);
             }
         }
     };
