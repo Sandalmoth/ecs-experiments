@@ -477,6 +477,16 @@ pub fn Storage(
                 next.destroy(alloc, height);
             }
 
+            fn get(node: *Node, height: u32, key: u32) ?*T {
+                const i = upperBound(node.keys[0 .. node.len - 1], key);
+
+                if (height == 1) {
+                    return lp(node.children[i]).get(key);
+                } else {
+                    return np(node.children[i]).get(height - 1, key);
+                }
+            }
+
             fn _debugPrint(node: *Node, height: u32, depth: u32) void {
                 std.debug.assert(height > 0);
                 for (0..depth) |_| std.debug.print("  ", .{});
@@ -560,8 +570,12 @@ pub fn Storage(
                 );
                 leaf.len = half;
                 next.len = LEAF_SIZE + 1 - half;
-                leaf.next = next;
+                next.next = leaf.next;
                 next.prev = leaf;
+                if (leaf.next != null) {
+                    leaf.next.?.prev = next;
+                }
+                leaf.next = next;
 
                 return next;
             }
@@ -607,6 +621,16 @@ pub fn Storage(
                 next.destroy(alloc);
             }
 
+            fn get(leaf: *Leaf, key: u32) ?*T {
+                const i = lowerBound(leaf.keys[0 .. leaf.len - 1], key);
+
+                if (leaf.keys[i] == key) {
+                    return &leaf.vals[i];
+                }
+
+                return null;
+            }
+
             fn _debugPrint(leaf: *Leaf, depth: u32) void {
                 for (0..depth) |_| std.debug.print("  ", .{});
 
@@ -621,8 +645,26 @@ pub fn Storage(
         const Iterator = struct {
             const KV = struct { key: u32, val: T };
 
-            pub fn next() ?*KV {
-                @compileError("TODO");
+            leaf: ?*Leaf,
+            cursor: usize = 0,
+
+            pub fn next(it: *Iterator) ?KV {
+                if (it.leaf == null) {
+                    return null;
+                }
+
+                const result = KV{
+                    .key = it.leaf.?.keys[it.cursor],
+                    .val = it.leaf.?.vals[it.cursor],
+                };
+
+                it.cursor += 1;
+                while (it.leaf != null and it.cursor == it.leaf.?.len) {
+                    it.cursor = 0;
+                    it.leaf = it.leaf.?.next;
+                }
+
+                return result;
             }
         };
 
@@ -686,6 +728,7 @@ pub fn Storage(
 
         fn del(storage: *Self, key: u32) void {
             std.debug.assert(storage.height >= 0);
+            std.debug.assert(storage.root != 0);
 
             if (storage.height == 0) {
                 const underflow = lp(storage.root).del(key);
@@ -717,9 +760,15 @@ pub fn Storage(
         }
 
         fn get(storage: *Self, key: u32) ?*T {
-            _ = storage;
-            _ = key;
-            @compileError("TODO");
+            if (storage.root == 0) {
+                return null;
+            }
+
+            if (storage.height == 0) {
+                return lp(storage.root).get(key);
+            } else {
+                return np(storage.root).get(storage.height, key);
+            }
         }
 
         inline fn has(storage: *Self, key: u32) bool {
@@ -727,8 +776,16 @@ pub fn Storage(
         }
 
         fn iterator(storage: *Self) Iterator {
-            _ = storage;
-            @compileError("TODO");
+            if (storage.height == 0) {
+                return .{ .leaf = lp(storage.root) };
+            }
+
+            var walk = storage.root;
+            var h = storage.height;
+            while (h > 0) : (h -= 1) {
+                walk = np(walk).children[0];
+            }
+            return .{ .leaf = lp(walk) };
         }
 
         fn np(ptr: usize) *Node {
@@ -771,12 +828,35 @@ pub fn main() !void {
             i = (i + 40507) % 256;
         }
 
+        var it = s.iterator();
+        while (it.next()) |kv| {
+            std.debug.print("iterating: {}: {}\n", .{ kv.key, kv.val });
+        }
+
         i = 0;
-        for (0..100) |j| {
+        for (0..50) |j| {
             std.debug.print("\ndeleting {}: {}\n", .{ i, j });
             s.del(i);
             s.debugPrint();
             i = (i + 40507) % 256;
+            i = (i + 40507) % 256;
+        }
+
+        i = 0;
+        for (0..100) |j| {
+            std.debug.print("searching for {}: {}\n", .{ i, j });
+            const v = s.get(i);
+            if (i % 2 == 0) {
+                std.debug.assert(v == null);
+            } else {
+                std.debug.assert(v.?.* == j);
+            }
+            i = (i + 40507) % 256;
+        }
+
+        it = s.iterator();
+        while (it.next()) |kv| {
+            std.debug.print("iterating: {}: {}\n", .{ kv.key, kv.val });
         }
     }
 
@@ -792,12 +872,35 @@ pub fn main() !void {
             i = (i + 40507) % 256;
         }
 
+        var it = s.iterator();
+        while (it.next()) |kv| {
+            std.debug.print("iterating: {}: {}\n", .{ kv.key, kv.val });
+        }
+
         i = 0;
-        for (0..100) |j| {
+        for (0..50) |j| {
             std.debug.print("\ndeleting {}: {}\n", .{ i, j });
             s.del(i);
             s.debugPrint();
             i = (i + 40507) % 256;
+            i = (i + 40507) % 256;
+        }
+
+        i = 0;
+        for (0..100) |j| {
+            std.debug.print("searching for {}: {}\n", .{ i, j });
+            const v = s.get(i);
+            if (i % 2 == 0) {
+                std.debug.assert(v == null);
+            } else {
+                std.debug.assert(v.?.* == j);
+            }
+            i = (i + 40507) % 256;
+        }
+
+        it = s.iterator();
+        while (it.next()) |kv| {
+            std.debug.print("iterating: {}: {}\n", .{ kv.key, kv.val });
         }
     }
 }
