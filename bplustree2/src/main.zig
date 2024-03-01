@@ -198,7 +198,7 @@ pub fn Storage(
                             );
                             _ = node.keys.remove(loc);
                             _ = node.children.remove(loc);
-                            node.keys.set(loc - 1, lp(node.children.at(loc - 1)).keys.front());
+                            node.keys.set(loc - 1, np(node.children.at(loc - 1)).keys.front());
                         } else if (np(node.children.at(loc + 1)).children.len > NODE_SIZE / 2 + 1) {
                             // steal right
                             std.debug.assert(loc == 0);
@@ -224,7 +224,7 @@ pub fn Storage(
                             );
                             _ = node.keys.remove(loc + 1);
                             _ = node.children.remove(loc + 1);
-                            node.keys.set(loc, lp(node.children.at(loc)).keys.front());
+                            node.keys.set(loc, np(node.children.at(loc)).keys.front());
                         }
                     }
                 }
@@ -474,7 +474,10 @@ pub fn main() !void {
     var s = Storage(u32, f32, 3, 3).init(alloc);
     defer s.deinit();
 
-    const n = 32;
+    std.debug.print("{}\n", .{@sizeOf(@TypeOf(s).Node)});
+    std.debug.print("{}\n", .{@sizeOf(@TypeOf(s).Leaf)});
+
+    const n = 8;
     for (0..n) |i| {
         // std.debug.print("\ninserting {}\n", .{i});
         // try s.add(@intCast(i), @floatFromInt(i));
@@ -494,15 +497,14 @@ pub fn main() !void {
         s.debugPrint();
     }
 
-    // std.debug.print("{}\n", .{@sizeOf(@TypeOf(s).Node)});
-    // std.debug.print("{}\n", .{@sizeOf(@TypeOf(s).Leaf)});
-
     // some fuzz tests just to see that we don't hit a crash/assert
     std.debug.print("\ncommencing fuzz tests!\n", .{});
 
     const fuzz_lim = 16 * 1024; // must be power of two for the weyl sequence
+    const fuzz_n = 31;
+    const fuzz_m = 15;
     {
-        var _s = Storage(u32, f32, 3, 3).init(alloc);
+        var _s = Storage(u32, f32, fuzz_n, fuzz_m).init(alloc);
         defer _s.deinit();
 
         for (0..fuzz_lim) |i| {
@@ -515,7 +517,7 @@ pub fn main() !void {
     }
 
     {
-        var _s = Storage(u32, f32, 3, 3).init(alloc);
+        var _s = Storage(u32, f32, fuzz_n, fuzz_m).init(alloc);
         defer _s.deinit();
 
         for (0..fuzz_lim) |i| {
@@ -528,7 +530,7 @@ pub fn main() !void {
     }
 
     {
-        var _s = Storage(u32, f32, 3, 3).init(alloc);
+        var _s = Storage(u32, f32, fuzz_n, fuzz_m).init(alloc);
         defer _s.deinit();
 
         var x: u32 = 0;
