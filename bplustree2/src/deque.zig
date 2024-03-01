@@ -17,6 +17,12 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
             return dq.data[(dq.start + i) % SIZE];
         }
 
+        pub inline fn set(dq: *Deque, i: u32, x: T) void {
+            std.debug.assert(i < dq.len);
+
+            dq.data[(dq.start + i) % SIZE] = x;
+        }
+
         pub inline fn front(dq: Deque) T {
             std.debug.assert(dq.len > 0);
 

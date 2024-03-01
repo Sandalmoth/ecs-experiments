@@ -90,6 +90,68 @@ pub fn Storage(
                 return result;
             }
 
+            fn del(node: *Node, alloc: std.mem.Allocator, height: usize, key: K) bool {
+                // NOTE the use of upperBound for searching in nodes
+                // as if our element is equal, we want to go right, not left
+                // so equal elements should return the next index, rather than their own
+                const loc = node.keys.upperBound(key);
+
+                if (height == 1) {
+                    const underflow = lp(node.children.at(loc)).del(key);
+                    if (underflow) {
+                        if (lp(node.children.at(loc)).keys.len == 0) {
+                            // I think this is impossible if we do shuffling
+                            @panic("deleting last entry of node at non-root");
+                        }
+
+                        // strategy is
+                        // 1. steal left
+                        // 2. merge left
+                        // 3. steal right
+                        // 4. merge right
+                        // and the deques should make stealing nice and fast
+
+                        if (loc > 0 and
+                            lp(node.children.at(loc - 1)).keys.len > LEAF_SIZE / 2)
+                        {
+                            @panic("steal left");
+                        } else if (loc > 0) {
+                            // if we cannot steal left, but left exists, there is room to merge
+                            std.debug.assert(lp(node.children.at(loc)).keys.len +
+                                lp(node.children.at(loc - 1)).keys.len <= LEAF_SIZE);
+
+                            // lp(node.children.at(loc - 1)).merge(lp(node.children.at(loc)));
+                            @panic("merge left");
+                        } else if (loc < node.keys.len and
+                            lp(node.children.at(loc + 1)).keys.len > LEAF_SIZE / 2)
+                        {
+                            // NOTE in the condition: node.keys.len == node.children.len - 1
+                            lp(node.children.at(loc)).keys.pushBack(
+                                lp(node.children.at(loc + 1)).keys.popFront(),
+                            );
+                            lp(node.children.at(loc)).vals.pushBack(
+                                lp(node.children.at(loc + 1)).vals.popFront(),
+                            );
+                            node.keys.set(loc, lp(node.children.at(loc + 1)).keys.front());
+                        } else if (loc < node.keys.len) {
+                            std.debug.assert(lp(node.children.at(loc)).keys.len +
+                                lp(node.children.at(loc + 1)).keys.len <= LEAF_SIZE);
+
+                            lp(node.children.at(loc)).merge(alloc, lp(node.children.at(loc + 1)));
+                            _ = node.keys.remove(loc);
+                            _ = node.children.remove(loc + 1);
+                        }
+                    }
+                } else {
+                    const underflow = np(node.children.at(loc)).del(alloc, height - 1, key);
+                    if (underflow) {
+                        @panic("node del node underflow");
+                    }
+                }
+
+                return node.children.len < NODE_SIZE / 2;
+            }
+
             fn _debugPrint(node: *Node, height: usize, depth: usize) void {
                 std.debug.assert(height > 0);
                 for (0..depth) |_| std.debug.print("  ", .{});
@@ -136,6 +198,7 @@ pub fn Storage(
                 leaf.keys.insert(loc, key);
                 leaf.vals.insert(loc, val);
 
+                std.debug.assert(leaf.keys.len == leaf.vals.len);
                 return leaf.keys.len > LEAF_SIZE;
             }
 
@@ -159,6 +222,32 @@ pub fn Storage(
                 return next;
             }
 
+            fn del(leaf: *Leaf, key: K) bool {
+                const loc = leaf.keys.lowerBound(key);
+                std.debug.assert(leaf.keys.at(loc) == key);
+
+                _ = leaf.keys.remove(loc);
+                _ = leaf.vals.remove(loc);
+
+                std.debug.assert(leaf.keys.len == leaf.vals.len);
+                return leaf.keys.len < LEAF_SIZE / 2;
+            }
+
+            fn merge(leaf: *Leaf, alloc: std.mem.Allocator, next: *Leaf) void {
+                std.debug.assert(leaf.keys.back() < next.keys.front());
+                while (next.keys.len > 0) {
+                    leaf.keys.pushBack(next.keys.popFront());
+                    leaf.vals.pushBack(next.vals.popFront());
+                }
+                // stitch the neighbors, as next will be destroyed
+                leaf.next = next.next;
+                if (next.next != null) {
+                    next.next.?.prev = leaf;
+                }
+
+                next.destroy(alloc);
+            }
+
             fn _debugPrint(leaf: *Leaf, depth: usize) void {
                 for (0..depth) |_| std.debug.print("  ", .{});
                 std.debug.print("{}\n", .{leaf.keys});
@@ -170,12 +259,14 @@ pub fn Storage(
         alloc: std.mem.Allocator,
         root: usize,
         height: usize,
+        len: usize,
 
         pub fn init(alloc: std.mem.Allocator) Self {
             return .{
                 .alloc = alloc,
                 .root = 0,
                 .height = 0,
+                .len = 0,
             };
         }
 
@@ -191,6 +282,7 @@ pub fn Storage(
         }
 
         /// asserts that the key is not in the storage
+        /// on error, the storage may be left in an irreparable invalid state
         pub fn add(storage: *Self, key: K, val: V) !void {
             if (storage.root == 0) {
                 const root = try Leaf.create(storage.alloc);
@@ -226,6 +318,38 @@ pub fn Storage(
                     storage.height += 1;
                 }
             }
+
+            storage.len += 1;
+        }
+
+        /// asserts that the key is in the storage
+        pub fn del(storage: *Self, key: K) void {
+            std.debug.assert(storage.root != 0);
+            std.debug.assert(storage.len > 0);
+
+            if (storage.height == 0) {
+                const underflow = lp(storage.root).del(key);
+                if (underflow and lp(storage.root).keys.len == 0) {
+                    lp(storage.root).destroy(storage.alloc);
+                    storage.root = 0;
+                    std.debug.assert(storage.height == 0);
+                    std.debug.assert(storage.len == 1); // decremented at end of this function
+                }
+            } else {
+                const underflow = np(storage.root).del(storage.alloc, storage.height, key);
+                if (underflow and np(storage.root).keys.len < 2) {
+                    // special case for root node allows size all the way down to 2
+                    std.debug.assert(np(storage.root).children.len == 1);
+
+                    const old = np(storage.root);
+                    storage.root = np(storage.root).children.front();
+                    old.children.len = 0;
+                    old.destroy(storage.alloc, storage.height);
+                    storage.height -= 1;
+                }
+            }
+
+            storage.len -= 1;
         }
 
         fn np(ptr: usize) *Node {
@@ -259,9 +383,57 @@ pub fn main() !void {
     var s = Storage(u32, f32, 4, 4).init(alloc);
     defer s.deinit();
 
-    for (0..100) |i| {
+    const n = 5;
+    for (0..n) |i| {
         std.debug.print("\ninserting {}\n", .{i});
         try s.add(@intCast(i), @floatFromInt(i));
         s.debugPrint();
+    }
+
+    for (0..n) |i| {
+        std.debug.print("\ndeleting {}\n", .{i});
+        s.del(@intCast(i));
+        s.debugPrint();
+    }
+
+    // std.debug.print("{}\n", .{@sizeOf(@TypeOf(s).Node)});
+    // std.debug.print("{}\n", .{@sizeOf(@TypeOf(s).Leaf)});
+
+    // some fuzz tests just to see that we don't hit a crash/assert
+
+    const fuzz_lim = 4 * 1024; // must be power of two for the weyl sequence
+    {
+        var _s = Storage(u32, f32, 4, 4).init(alloc);
+        defer _s.deinit();
+
+        for (0..fuzz_lim) |i| {
+            try _s.add(@intCast(i), @floatFromInt(i));
+        }
+        // _s.debugPrint();
+    }
+
+    {
+        var _s = Storage(u32, f32, 4, 4).init(alloc);
+        defer _s.deinit();
+
+        for (0..fuzz_lim) |i| {
+            try _s.add(
+                fuzz_lim - @as(u32, @intCast(i)),
+                @floatFromInt(i),
+            );
+        }
+        // _s.debugPrint();
+    }
+
+    {
+        var _s = Storage(u32, f32, 4, 4).init(alloc);
+        defer _s.deinit();
+
+        var x: u32 = 0;
+        for (0..fuzz_lim) |i| {
+            try _s.add(x % fuzz_lim, @floatFromInt(i));
+            x +%= 2_654_435_761; // prime
+        }
+        // _s.debugPrint();
     }
 }
