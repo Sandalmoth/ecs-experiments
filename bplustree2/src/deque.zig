@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
     std.debug.assert(SIZE > 0);
     std.debug.assert(SIZE < std.math.maxInt(u32) / 2); // avoid overflow in index maths
+    std.debug.assert(std.math.isPowerOfTwo(SIZE)); // otherwise perf is bad
 
     return struct {
         const Deque = @This();
