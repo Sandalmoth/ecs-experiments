@@ -91,17 +91,20 @@ pub fn Storage(
             }
 
             fn del(node: *Node, alloc: std.mem.Allocator, height: usize, key: K) bool {
+                std.debug.assert(node.children.len >= 2);
+                std.debug.assert(node.children.len == node.keys.len + 1);
                 // NOTE the use of upperBound for searching in nodes
                 // as if our element is equal, we want to go right, not left
                 // so equal elements should return the next index, rather than their own
                 const loc = node.keys.upperBound(key);
+                std.debug.print("{} {} {}\n", .{ node.keys, key, loc });
 
                 if (height == 1) {
                     const underflow = lp(node.children.at(loc)).del(key);
+                    node._debugPrint(height, 0);
                     if (underflow) {
                         if (lp(node.children.at(loc)).keys.len == 0) {
-                            // I think this is impossible if we do shuffling
-                            @panic("deleting last entry of node at non-root");
+                            unreachable; // stealing should prevent this from ever happening
                         }
 
                         // strategy is
@@ -114,14 +117,21 @@ pub fn Storage(
                         if (loc > 0 and
                             lp(node.children.at(loc - 1)).keys.len > LEAF_SIZE / 2)
                         {
-                            @panic("steal left");
+                            lp(node.children.at(loc - 1)).keys.pushBack(
+                                lp(node.children.at(loc)).keys.popFront(),
+                            );
+                            lp(node.children.at(loc - 1)).vals.pushBack(
+                                lp(node.children.at(loc)).vals.popFront(),
+                            );
+                            node.keys.set(loc, lp(node.children.at(loc)).keys.front());
                         } else if (loc > 0) {
                             // if we cannot steal left, but left exists, there is room to merge
                             std.debug.assert(lp(node.children.at(loc)).keys.len +
                                 lp(node.children.at(loc - 1)).keys.len <= LEAF_SIZE);
 
-                            // lp(node.children.at(loc - 1)).merge(lp(node.children.at(loc)));
-                            @panic("merge left");
+                            lp(node.children.at(loc - 1)).merge(alloc, lp(node.children.at(loc)));
+                            _ = node.keys.remove(loc - 1);
+                            _ = node.children.remove(loc);
                         } else if (loc < node.keys.len and
                             lp(node.children.at(loc + 1)).keys.len > LEAF_SIZE / 2)
                         {
@@ -137,18 +147,53 @@ pub fn Storage(
                             std.debug.assert(lp(node.children.at(loc)).keys.len +
                                 lp(node.children.at(loc + 1)).keys.len <= LEAF_SIZE);
 
+                            node._debugPrint(height, 0);
+
+                            std.debug.print("{}\n", .{node.keys});
+                            std.debug.print("{}\n", .{node.children});
+
                             lp(node.children.at(loc)).merge(alloc, lp(node.children.at(loc + 1)));
                             _ = node.keys.remove(loc);
                             _ = node.children.remove(loc + 1);
+
+                            std.debug.print("{}\n", .{node.keys});
+                            std.debug.print("{}\n", .{node.children});
+
+                            node._debugPrint(height, 0);
                         }
                     }
                 } else {
                     const underflow = np(node.children.at(loc)).del(alloc, height - 1, key);
+                    node._debugPrint(height, 0);
                     if (underflow) {
-                        @panic("node del node underflow");
+                        if (np(node.children.at(loc)).children.len == 0) {
+                            unreachable; // stealing should prevent this from ever happening
+                        }
+
+                        // strategy is the same as for the leaf underflow
+                        if (loc > 0 and
+                            np(node.children.at(loc - 1)).children.len > NODE_SIZE / 2)
+                        {
+                            @panic("steal left");
+                        } else if (loc > 0) {
+                            @panic("merge left");
+                        } else if (loc < node.keys.len and
+                            np(node.children.at(loc + 1)).children.len > NODE_SIZE / 2)
+                        {
+                            std.debug.print("{}\n", .{node.keys});
+                            std.debug.print("{}\n", .{node.children});
+                            std.debug.print("{}\n", .{np(node.children.at(loc)).keys});
+                            std.debug.print("{}\n", .{np(node.children.at(loc)).children});
+                            std.debug.print("{}\n", .{np(node.children.at(loc + 1)).keys});
+                            std.debug.print("{}\n", .{np(node.children.at(loc + 1)).children});
+                            @panic("steal right");
+                        } else if (loc < node.keys.len) {
+                            @panic("merge right");
+                        }
                     }
                 }
 
+                node._debugPrint(height, 0);
                 return node.children.len < NODE_SIZE / 2;
             }
 
@@ -383,7 +428,7 @@ pub fn main() !void {
     var s = Storage(u32, f32, 4, 4).init(alloc);
     defer s.deinit();
 
-    const n = 5;
+    const n = 11;
     for (0..n) |i| {
         std.debug.print("\ninserting {}\n", .{i});
         try s.add(@intCast(i), @floatFromInt(i));
@@ -393,6 +438,8 @@ pub fn main() !void {
     for (0..n) |i| {
         std.debug.print("\ndeleting {}\n", .{i});
         s.del(@intCast(i));
+        // std.debug.print("\ndeleting {}\n", .{n - i - 1});
+        // s.del(@intCast(n - i - 1));
         s.debugPrint();
     }
 
@@ -400,6 +447,7 @@ pub fn main() !void {
     // std.debug.print("{}\n", .{@sizeOf(@TypeOf(s).Leaf)});
 
     // some fuzz tests just to see that we don't hit a crash/assert
+    std.debug.print("\ncommencing fuzz tests!\n", .{});
 
     const fuzz_lim = 4 * 1024; // must be power of two for the weyl sequence
     {
@@ -409,7 +457,10 @@ pub fn main() !void {
         for (0..fuzz_lim) |i| {
             try _s.add(@intCast(i), @floatFromInt(i));
         }
-        // _s.debugPrint();
+
+        for (0..fuzz_lim) |i| {
+            _ = _s.del(@intCast(i));
+        }
     }
 
     {
@@ -417,12 +468,12 @@ pub fn main() !void {
         defer _s.deinit();
 
         for (0..fuzz_lim) |i| {
-            try _s.add(
-                fuzz_lim - @as(u32, @intCast(i)),
-                @floatFromInt(i),
-            );
+            try _s.add(fuzz_lim - @as(u32, @intCast(i)), @floatFromInt(i));
         }
-        // _s.debugPrint();
+
+        for (0..fuzz_lim) |i| {
+            _ = _s.del(fuzz_lim - @as(u32, @intCast(i)));
+        }
     }
 
     {
@@ -434,6 +485,13 @@ pub fn main() !void {
             try _s.add(x % fuzz_lim, @floatFromInt(i));
             x +%= 2_654_435_761; // prime
         }
-        // _s.debugPrint();
+
+        x = 0;
+        for (0..fuzz_lim) |_| {
+            _ = _s.del(x % fuzz_lim);
+            x +%= 2_654_435_761;
+        }
     }
+
+    std.debug.print("fuzz tests finished!\n", .{});
 }

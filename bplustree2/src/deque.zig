@@ -178,10 +178,14 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
             writer: anytype,
         ) std.os.WriteError!void {
             try writer.print("[", .{});
-            for (0..dq.len - 1) |i| {
-                try writer.print("{} ", .{dq.at(@intCast(i))});
+            if (dq.len > 0) {
+                for (0..dq.len - 1) |i| {
+                    try writer.print("{} ", .{dq.at(@intCast(i))});
+                }
+                try writer.print("{}]", .{dq.at(dq.len - 1)});
+            } else {
+                try writer.print("]", .{});
             }
-            try writer.print("{}]", .{dq.at(dq.len - 1)});
         }
     };
 }
