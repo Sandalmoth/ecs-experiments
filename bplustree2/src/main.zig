@@ -11,23 +11,23 @@ pub fn Storage(
     comptime NODE_SIZE: comptime_int, // max number of children for an internal node
     comptime LEAF_SIZE: comptime_int, // max number of entries in a leaf node
 ) type {
-    std.debug.assert(NODE_SIZE >= 4);
-    std.debug.assert(LEAF_SIZE >= 4);
+    std.debug.assert(NODE_SIZE >= 3);
+    std.debug.assert(LEAF_SIZE >= 3);
     // circular array deques are much faster for power-of-two sizes
     // so we'll just make that a restriction
-    std.debug.assert(std.math.isPowerOfTwo(NODE_SIZE));
-    std.debug.assert(std.math.isPowerOfTwo(LEAF_SIZE));
+    std.debug.assert(std.math.isPowerOfTwo(NODE_SIZE + 1));
+    std.debug.assert(std.math.isPowerOfTwo(LEAF_SIZE + 1));
 
     return struct {
         const Self = @This();
 
         const Node = struct {
-            keys: Deque(NODE_SIZE, K),
+            keys: Deque(NODE_SIZE + 1, K), // one unused
             children: Deque(NODE_SIZE + 1, usize),
 
             fn create(alloc: std.mem.Allocator) !*Node {
                 var node = try alloc.create(Node);
-                node.keys = Deque(NODE_SIZE, K){};
+                node.keys = Deque(NODE_SIZE + 1, K){};
                 node.children = Deque(NODE_SIZE + 1, usize){};
                 return node;
             }
@@ -97,15 +97,15 @@ pub fn Storage(
                 // as if our element is equal, we want to go right, not left
                 // so equal elements should return the next index, rather than their own
                 const loc = node.keys.upperBound(key);
-                std.debug.print("{} {} {}\n", .{ node.keys, key, loc });
+                // node._debugPrint(height, 0);
 
                 if (height == 1) {
                     const underflow = lp(node.children.at(loc)).del(key);
-                    node._debugPrint(height, 0);
                     if (underflow) {
                         if (lp(node.children.at(loc)).keys.len == 0) {
                             unreachable; // stealing should prevent this from ever happening
                         }
+                        // node._debugPrint(height, 0);
 
                         // strategy is
                         // 1. steal left
@@ -115,16 +115,20 @@ pub fn Storage(
                         // and the deques should make stealing nice and fast
 
                         if (loc > 0 and
-                            lp(node.children.at(loc - 1)).keys.len > LEAF_SIZE / 2)
+                            lp(node.children.at(loc - 1)).keys.len > LEAF_SIZE / 2 + 1)
                         {
-                            lp(node.children.at(loc - 1)).keys.pushBack(
-                                lp(node.children.at(loc)).keys.popFront(),
+                            // steal left
+                            std.debug.print("leaf steal left\n", .{});
+                            lp(node.children.at(loc)).keys.pushFront(
+                                lp(node.children.at(loc - 1)).keys.popBack(),
                             );
-                            lp(node.children.at(loc - 1)).vals.pushBack(
-                                lp(node.children.at(loc)).vals.popFront(),
+                            lp(node.children.at(loc)).vals.pushFront(
+                                lp(node.children.at(loc - 1)).vals.popBack(),
                             );
-                            node.keys.set(loc, lp(node.children.at(loc)).keys.front());
+                            node.keys.set(loc - 1, lp(node.children.at(loc)).keys.front());
                         } else if (loc > 0) {
+                            // merge left
+                            std.debug.print("leaf merge left\n", .{});
                             // if we cannot steal left, but left exists, there is room to merge
                             std.debug.assert(lp(node.children.at(loc)).keys.len +
                                 lp(node.children.at(loc - 1)).keys.len <= LEAF_SIZE);
@@ -133,8 +137,11 @@ pub fn Storage(
                             _ = node.keys.remove(loc - 1);
                             _ = node.children.remove(loc);
                         } else if (loc < node.keys.len and
-                            lp(node.children.at(loc + 1)).keys.len > LEAF_SIZE / 2)
+                            lp(node.children.at(loc + 1)).keys.len > LEAF_SIZE / 2 + 1)
                         {
+                            // steal right
+                            std.debug.assert(loc == 0);
+                            std.debug.print("leaf steal right\n", .{});
                             // NOTE in the condition: node.keys.len == node.children.len - 1
                             lp(node.children.at(loc)).keys.pushBack(
                                 lp(node.children.at(loc + 1)).keys.popFront(),
@@ -144,57 +151,138 @@ pub fn Storage(
                             );
                             node.keys.set(loc, lp(node.children.at(loc + 1)).keys.front());
                         } else if (loc < node.keys.len) {
+                            // merge right
+                            std.debug.assert(loc == 0);
+                            std.debug.print("leaf merge right\n", .{});
                             std.debug.assert(lp(node.children.at(loc)).keys.len +
                                 lp(node.children.at(loc + 1)).keys.len <= LEAF_SIZE);
-
-                            node._debugPrint(height, 0);
-
-                            std.debug.print("{}\n", .{node.keys});
-                            std.debug.print("{}\n", .{node.children});
 
                             lp(node.children.at(loc)).merge(alloc, lp(node.children.at(loc + 1)));
                             _ = node.keys.remove(loc);
                             _ = node.children.remove(loc + 1);
-
-                            std.debug.print("{}\n", .{node.keys});
-                            std.debug.print("{}\n", .{node.children});
-
-                            node._debugPrint(height, 0);
                         }
+                        // node._debugPrint(height, 0);
                     }
                 } else {
                     const underflow = np(node.children.at(loc)).del(alloc, height - 1, key);
-                    node._debugPrint(height, 0);
                     if (underflow) {
                         if (np(node.children.at(loc)).children.len == 0) {
                             unreachable; // stealing should prevent this from ever happening
                         }
+                        // node._debugPrint(height, 0);
 
                         // strategy is the same as for the leaf underflow
+
                         if (loc > 0 and
-                            np(node.children.at(loc - 1)).children.len > NODE_SIZE / 2)
+                            np(node.children.at(loc - 1)).children.len > NODE_SIZE / 2 + 1)
                         {
-                            @panic("steal left");
+                            // steal left
+                            std.debug.print("node merge left\n", .{});
+                            _ = np(node.children.at(loc - 1)).keys.popBack();
+                            if (height == 2) {
+                                np(node.children.at(loc)).keys.pushFront(
+                                    lp(np(node.children.at(loc)).children.front()).keys.front(),
+                                );
+                            } else {
+                                np(node.children.at(loc)).keys.pushFront(
+                                    np(np(node.children.at(loc)).children.front()).keys.front(),
+                                );
+                            }
+                            np(node.children.at(loc)).children.pushFront(
+                                np(node.children.at(loc - 1)).children.popBack(),
+                            );
+                            const new_lb = blk: {
+                                var h = height - 1;
+                                var walk = node.children.at(loc);
+                                while (h > 0) : (h -= 1) {
+                                    walk = np(walk).children.front();
+                                }
+                                break :blk lp(walk).keys.front();
+                            };
+                            node.keys.set(loc - 1, new_lb);
                         } else if (loc > 0) {
-                            @panic("merge left");
+                            // merge left
+                            std.debug.print("node merge left\n", .{});
+                            std.debug.assert(np(node.children.at(loc)).keys.len +
+                                np(node.children.at(loc - 1)).keys.len <= NODE_SIZE);
+
+                            np(node.children.at(loc - 1)).merge(
+                                alloc,
+                                height - 1,
+                                np(node.children.at(loc)),
+                            );
+                            _ = node.keys.remove(loc - 1);
+                            _ = node.children.remove(loc);
                         } else if (loc < node.keys.len and
-                            np(node.children.at(loc + 1)).children.len > NODE_SIZE / 2)
+                            np(node.children.at(loc + 1)).children.len > NODE_SIZE / 2 + 1)
                         {
-                            std.debug.print("{}\n", .{node.keys});
-                            std.debug.print("{}\n", .{node.children});
-                            std.debug.print("{}\n", .{np(node.children.at(loc)).keys});
-                            std.debug.print("{}\n", .{np(node.children.at(loc)).children});
-                            std.debug.print("{}\n", .{np(node.children.at(loc + 1)).keys});
-                            std.debug.print("{}\n", .{np(node.children.at(loc + 1)).children});
-                            @panic("steal right");
+                            // steal right
+                            std.debug.assert(loc == 0);
+                            std.debug.print("node steal right\n", .{});
+                            std.debug.print("{}\n", .{loc});
+                            if (height == 2) {
+                                np(node.children.at(loc)).keys.pushBack(
+                                    lp(np(node.children.at(loc + 1)).children.front()).keys.front(),
+                                );
+                            } else {
+                                np(node.children.at(loc)).keys.pushBack(
+                                    np(np(node.children.at(loc + 1)).children.front()).keys.front(),
+                                );
+                            }
+                            _ = np(node.children.at(loc + 1)).keys.popFront();
+                            np(node.children.at(loc)).children.pushBack(
+                                np(node.children.at(loc + 1)).children.popFront(),
+                            );
+                            const new_lb = blk: {
+                                var h = height - 1;
+                                var walk = node.children.at(loc + 1);
+                                while (h > 0) : (h -= 1) {
+                                    walk = np(walk).children.front();
+                                }
+                                break :blk lp(walk).keys.front();
+                            };
+                            node.keys.set(loc, new_lb);
                         } else if (loc < node.keys.len) {
-                            @panic("merge right");
+                            // merge right
+                            std.debug.assert(loc == 0);
+                            std.debug.print("node merge right\n", .{});
+                            std.debug.assert(np(node.children.at(loc)).keys.len +
+                                np(node.children.at(loc + 1)).keys.len <= NODE_SIZE);
+
+                            np(node.children.at(loc)).merge(
+                                alloc,
+                                height - 1,
+                                np(node.children.at(loc + 1)),
+                            );
+                            _ = node.keys.remove(loc);
+                            _ = node.children.remove(loc + 1);
                         }
+
+                        // node._debugPrint(height, 0);
                     }
                 }
 
-                node._debugPrint(height, 0);
-                return node.children.len < NODE_SIZE / 2;
+                return node.children.len <= NODE_SIZE / 2;
+            }
+
+            fn merge(node: *Node, alloc: std.mem.Allocator, height: usize, next: *Node) void {
+                const new_lb = blk: {
+                    var h = height;
+                    var walk = @intFromPtr(next);
+                    while (h > 0) : (h -= 1) {
+                        walk = np(walk).children.front();
+                    }
+                    break :blk lp(walk).keys.front();
+                };
+
+                node.keys.pushBack(new_lb);
+                node.children.pushBack(next.children.popFront());
+                while (next.children.len > 0) {
+                    node.keys.pushBack(next.keys.popFront());
+                    node.children.pushBack(next.children.popFront());
+                }
+
+                next.destroy(alloc, height);
             }
 
             fn _debugPrint(node: *Node, height: usize, depth: usize) void {
@@ -275,7 +363,7 @@ pub fn Storage(
                 _ = leaf.vals.remove(loc);
 
                 std.debug.assert(leaf.keys.len == leaf.vals.len);
-                return leaf.keys.len < LEAF_SIZE / 2;
+                return leaf.keys.len <= LEAF_SIZE / 2;
             }
 
             fn merge(leaf: *Leaf, alloc: std.mem.Allocator, next: *Leaf) void {
@@ -425,21 +513,26 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var s = Storage(u32, f32, 4, 4).init(alloc);
+    var s = Storage(u32, f32, 3, 3).init(alloc);
     defer s.deinit();
 
-    const n = 11;
+    const n = 32;
     for (0..n) |i| {
-        std.debug.print("\ninserting {}\n", .{i});
-        try s.add(@intCast(i), @floatFromInt(i));
-        s.debugPrint();
+        // std.debug.print("\ninserting {}\n", .{i});
+        // try s.add(@intCast(i), @floatFromInt(i));
+        // std.debug.print("\ninserting {}\n", .{i * 89 % n});
+        try s.add(@intCast(i * 89 % n), @floatFromInt(i));
+        // s.debugPrint();
     }
+    s.debugPrint();
 
     for (0..n) |i| {
-        std.debug.print("\ndeleting {}\n", .{i});
-        s.del(@intCast(i));
+        // std.debug.print("\ndeleting {}\n", .{i});
+        // s.del(@intCast(i));
         // std.debug.print("\ndeleting {}\n", .{n - i - 1});
         // s.del(@intCast(n - i - 1));
+        std.debug.print("\ndeleting {}\n", .{i * 87 % n});
+        s.del(@intCast(i * 87 % n));
         s.debugPrint();
     }
 
@@ -451,7 +544,7 @@ pub fn main() !void {
 
     const fuzz_lim = 4 * 1024; // must be power of two for the weyl sequence
     {
-        var _s = Storage(u32, f32, 4, 4).init(alloc);
+        var _s = Storage(u32, f32, 3, 3).init(alloc);
         defer _s.deinit();
 
         for (0..fuzz_lim) |i| {
@@ -464,7 +557,7 @@ pub fn main() !void {
     }
 
     {
-        var _s = Storage(u32, f32, 4, 4).init(alloc);
+        var _s = Storage(u32, f32, 3, 3).init(alloc);
         defer _s.deinit();
 
         for (0..fuzz_lim) |i| {
@@ -477,7 +570,7 @@ pub fn main() !void {
     }
 
     {
-        var _s = Storage(u32, f32, 4, 4).init(alloc);
+        var _s = Storage(u32, f32, 3, 3).init(alloc);
         defer _s.deinit();
 
         var x: u32 = 0;
