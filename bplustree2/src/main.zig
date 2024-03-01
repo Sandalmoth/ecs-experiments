@@ -52,8 +52,12 @@ pub fn Storage(
             }
 
             fn add(node: *Node, alloc: std.mem.Allocator, height: usize, key: K, val: V) !bool {
-                std.debug.print("{} {} {}\n", .{ node.keys, key, node.keys.upperBound(key) });
-                const loc = node.keys.upperBound(key) - 1;
+                const loc = blk: {
+                    if (key < node.keys.front()) {
+                        break :blk 0;
+                    }
+                    break :blk node.keys.upperBound(key) - 1;
+                };
                 std.debug.assert(node.keys.at(loc) != key);
 
                 if (height == 1) {
@@ -93,8 +97,6 @@ pub fn Storage(
                 // as if our element is equal, we want to go right, not left
                 // so equal elements should return the next index, rather than their own
                 const loc = node.keys.upperBound(key) - 1;
-                // node._debugPrint(height, 0);
-                // std.debug.print("{} {} {}\n", .{ node.keys, loc, key });
 
                 if (height == 1) {
                     const underflow = lp(node.children.at(loc)).del(key);
@@ -105,7 +107,6 @@ pub fn Storage(
                         if (lp(node.children.at(loc)).keys.len == 0) {
                             unreachable; // stealing should prevent this from ever happening
                         }
-                        // node._debugPrint(height, 0);
 
                         // strategy is
                         // 1. steal left
@@ -118,7 +119,6 @@ pub fn Storage(
                             lp(node.children.at(loc - 1)).keys.len > LEAF_SIZE / 2 + 1)
                         {
                             // steal left
-                            std.debug.print("leaf steal left\n", .{});
 
                             lp(node.children.at(loc)).keys.pushFront(
                                 lp(node.children.at(loc - 1)).keys.popBack(),
@@ -129,7 +129,6 @@ pub fn Storage(
                             node.keys.set(loc, lp(node.children.at(loc)).keys.front());
                         } else if (loc > 0) {
                             // merge left
-                            std.debug.print("leaf merge left\n", .{});
                             // if we cannot steal left, but left exists, there is room to merge
                             std.debug.assert(lp(node.children.at(loc)).keys.len +
                                 lp(node.children.at(loc - 1)).keys.len <= LEAF_SIZE);
@@ -141,7 +140,6 @@ pub fn Storage(
                         } else if (lp(node.children.at(loc + 1)).keys.len > LEAF_SIZE / 2 + 1) {
                             // steal right
                             std.debug.assert(loc == 0);
-                            std.debug.print("leaf steal right\n", .{});
                             // NOTE in the condition: node.keys.len == node.children.len - 1
                             lp(node.children.at(loc)).keys.pushBack(
                                 lp(node.children.at(loc + 1)).keys.popFront(),
@@ -154,7 +152,6 @@ pub fn Storage(
                         } else {
                             // merge right
                             std.debug.assert(loc == 0);
-                            std.debug.print("leaf merge right\n", .{});
                             std.debug.assert(lp(node.children.at(loc)).keys.len +
                                 lp(node.children.at(loc + 1)).keys.len <= LEAF_SIZE);
 
@@ -163,7 +160,6 @@ pub fn Storage(
                             _ = node.children.remove(loc + 1);
                             node.keys.set(loc, lp(node.children.at(loc)).keys.front());
                         }
-                        // node._debugPrint(height, 0);
                     }
 
                     //
@@ -176,7 +172,6 @@ pub fn Storage(
                         if (np(node.children.at(loc)).children.len == 0) {
                             unreachable; // stealing should prevent this from ever happening
                         }
-                        // node._debugPrint(height, 0);
 
                         // strategy is the same as for the leaf underflow
 
@@ -184,7 +179,6 @@ pub fn Storage(
                             np(node.children.at(loc - 1)).children.len > NODE_SIZE / 2 + 1)
                         {
                             // steal left
-                            std.debug.print("node steal left\n", .{});
                             np(node.children.at(loc)).keys.pushFront(
                                 np(node.children.at(loc - 1)).keys.popBack(),
                             );
@@ -194,7 +188,6 @@ pub fn Storage(
                             node.keys.set(loc, np(node.children.at(loc)).keys.front());
                         } else if (loc > 0) {
                             // merge left
-                            std.debug.print("node merge left\n", .{});
                             std.debug.assert(np(node.children.at(loc)).keys.len +
                                 np(node.children.at(loc - 1)).keys.len <= NODE_SIZE);
 
@@ -209,7 +202,6 @@ pub fn Storage(
                         } else if (np(node.children.at(loc + 1)).children.len > NODE_SIZE / 2 + 1) {
                             // steal right
                             std.debug.assert(loc == 0);
-                            std.debug.print("node steal right\n", .{});
 
                             np(node.children.at(loc)).keys.pushBack(
                                 np(node.children.at(loc + 1)).keys.popFront(),
@@ -222,7 +214,6 @@ pub fn Storage(
                         } else {
                             // merge right
                             std.debug.assert(loc == 0);
-                            std.debug.print("node merge right\n", .{});
                             std.debug.assert(np(node.children.at(loc)).keys.len +
                                 np(node.children.at(loc + 1)).keys.len <= NODE_SIZE);
 
@@ -231,13 +222,10 @@ pub fn Storage(
                                 height - 1,
                                 np(node.children.at(loc + 1)),
                             );
-                            // node._debugPrint(height, 0);
                             _ = node.keys.remove(loc + 1);
                             _ = node.children.remove(loc + 1);
                             node.keys.set(loc, lp(node.children.at(loc)).keys.front());
                         }
-
-                        // node._debugPrint(height, 0);
                     }
                 }
 
@@ -512,7 +500,7 @@ pub fn main() !void {
     // some fuzz tests just to see that we don't hit a crash/assert
     std.debug.print("\ncommencing fuzz tests!\n", .{});
 
-    const fuzz_lim = 4 * 1024; // must be power of two for the weyl sequence
+    const fuzz_lim = 16 * 1024; // must be power of two for the weyl sequence
     {
         var _s = Storage(u32, f32, 3, 3).init(alloc);
         defer _s.deinit();
@@ -531,9 +519,7 @@ pub fn main() !void {
         defer _s.deinit();
 
         for (0..fuzz_lim) |i| {
-            std.debug.print("{}\n", .{fuzz_lim - i});
             try _s.add(fuzz_lim - @as(u32, @intCast(i)), @floatFromInt(i));
-            s.debugPrint();
         }
 
         for (0..fuzz_lim) |i| {
