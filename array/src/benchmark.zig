@@ -1,6 +1,5 @@
 const std = @import("std");
 const Storage = @import("main.zig").Storage;
-const Deque = @import("deque.zig").FixedDeque;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -8,8 +7,6 @@ pub fn main() !void {
     const alloc = gpa.allocator();
 
     try bench3(alloc);
-    try bench2();
-    try bench1(alloc);
 }
 
 fn bench3(alloc: std.mem.Allocator) !void {
@@ -17,19 +14,16 @@ fn bench3(alloc: std.mem.Allocator) !void {
     var acc: u64 = 0;
     var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
 
-    const node_size = 31;
-    const leaf_size = 15;
-
     std.debug.print("len_1\tlen_2\tlen_3\tindel\titer_1\titer_12\titer_123\n", .{});
 
     for (6..22) |log_n| {
         const n: u32 = @as(u32, 1) << @intCast(log_n);
 
-        var s0 = Storage(u32, u32, node_size, leaf_size).init(alloc);
+        var s0 = try Storage(u32).init(alloc, n);
         defer s0.deinit();
-        var s1 = Storage(u32, u32, node_size, leaf_size).init(alloc);
+        var s1 = try Storage(u32).init(alloc, n);
         defer s1.deinit();
-        var s2 = Storage(u32, u32, node_size, leaf_size).init(alloc);
+        var s2 = try Storage(u32).init(alloc, n);
         defer s2.deinit();
 
         var timer = try std.time.Timer.start();
@@ -40,7 +34,7 @@ fn bench3(alloc: std.mem.Allocator) !void {
             if (s0.get(k)) |_| {
                 s0.del(k);
             } else {
-                try s0.add(k, k);
+                s0.add(k, k);
             }
         }
 
@@ -49,7 +43,7 @@ fn bench3(alloc: std.mem.Allocator) !void {
             if (s1.get(k)) |_| {
                 s1.del(k);
             } else {
-                try s1.add(k, k);
+                s1.add(k, k);
             }
         }
 
@@ -58,7 +52,7 @@ fn bench3(alloc: std.mem.Allocator) !void {
             if (s2.get(k)) |_| {
                 s2.del(k);
             } else {
-                try s2.add(k, k);
+                s2.add(k, k);
             }
         }
 
@@ -95,84 +89,6 @@ fn bench3(alloc: std.mem.Allocator) !void {
         std.debug.print(
             "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
             .{ s0.len, s1.len, s2.len, t_indel, t_it0, t_it1, t_it2 },
-        );
-    }
-
-    std.debug.print("\n{}\n\n", .{acc});
-}
-
-fn bench2() !void {
-    var acc: u64 = 0;
-    var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
-
-    std.debug.print("len\tlb_ms\tup_ms\n", .{});
-
-    inline for (.{ 4, 8, 16, 32, 64, 128 }) |n| {
-        var dq = Deque(n, u32){};
-
-        for (0..n) |i| {
-            dq.pushBack(@intCast(i));
-        }
-        std.debug.assert(dq.isSorted());
-
-        var timer = try std.time.Timer.start();
-
-        for (0..1_000_000) |_| {
-            acc += dq.lowerBound(rng.random().int(u32) % n);
-        }
-
-        const t_lb: f32 = @as(f32, @floatFromInt(timer.lap())) * 1e-6;
-
-        for (0..1_000_000) |_| {
-            acc += dq.upperBound(rng.random().int(u32) % n);
-        }
-
-        const t_ub: f32 = @as(f32, @floatFromInt(timer.lap())) * 1e-6;
-
-        std.debug.print(
-            "{}\t{d:.2}\t{d:.2}\n",
-            .{ n, t_lb, t_ub },
-        );
-    }
-
-    std.debug.print("\n{}\n\n", .{acc});
-}
-
-fn bench1(alloc: std.mem.Allocator) !void {
-    const M = 21;
-
-    std.debug.print("len\tcrt_ns\tget_ns\n", .{});
-
-    var acc: @Vector(4, f32) = @splat(0.0);
-
-    for (0..M) |m| {
-        const len = @as(usize, 1) << @intCast(m);
-        var i: u32 = 2_654_435_761;
-        var s = Storage(u32, @Vector(4, f32), 31, 15).init(alloc);
-        defer s.deinit();
-
-        var timer = try std.time.Timer.start();
-
-        for (0..len) |j| {
-            try s.add(i, @as(@Vector(4, f32), @splat(@floatFromInt(j))));
-            i +%= 2_654_435_761;
-        }
-
-        const create_time: f64 = @floatFromInt(timer.lap());
-
-        i = 2_654_435_761;
-        for (0..len) |_| {
-            acc += s.get(i).?.*;
-            i +%= 2_654_435_761;
-        }
-
-        const get_time: f64 = @floatFromInt(timer.lap());
-
-        const il2: f32 = 1 / @as(f32, @floatFromInt(len));
-
-        std.debug.print(
-            "{}\t{d:.2}\t{d:.2}\n",
-            .{ len, create_time * il2, get_time * il2 },
         );
     }
 
