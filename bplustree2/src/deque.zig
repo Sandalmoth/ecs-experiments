@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const LINEAR_VS_BINARY_CUTOFF = 32; // probably cpu dependent?
+
 pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
     std.debug.assert(SIZE > 0);
     std.debug.assert(SIZE < std.math.maxInt(u32) / 2); // avoid overflow in index maths
@@ -15,19 +17,19 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
         pub inline fn at(dq: Deque, i: u32) T {
             std.debug.assert(i < dq.len);
 
-            return dq.data[(dq.start + i) % SIZE];
+            return dq.data[(dq.start +% i) % SIZE];
         }
 
         pub inline fn ptr(dq: *Deque, i: u32) *T {
             std.debug.assert(i < dq.len);
 
-            return &dq.data[(dq.start + i) % SIZE];
+            return &dq.data[(dq.start +% i) % SIZE];
         }
 
         pub inline fn set(dq: *Deque, i: u32, x: T) void {
             std.debug.assert(i < dq.len);
 
-            dq.data[(dq.start + i) % SIZE] = x;
+            dq.data[(dq.start +% i) % SIZE] = x;
         }
 
         pub inline fn front(dq: Deque) T {
@@ -39,13 +41,13 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
         pub inline fn back(dq: Deque) T {
             std.debug.assert(dq.len > 0);
 
-            return dq.data[(dq.start + dq.len - 1) % SIZE];
+            return dq.data[(dq.start +% dq.len -% 1) % SIZE];
         }
 
         pub fn pushFront(dq: *Deque, x: T) void {
             std.debug.assert(dq.len < SIZE);
 
-            dq.start = (dq.start + SIZE - 1) % SIZE;
+            dq.start = (dq.start +% SIZE -% 1) % SIZE;
             dq.data[dq.start] = x;
             dq.len += 1;
         }
@@ -53,7 +55,7 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
         pub fn pushBack(dq: *Deque, x: T) void {
             std.debug.assert(dq.len < SIZE);
 
-            const i = (dq.start + dq.len) % SIZE;
+            const i = (dq.start +% dq.len) % SIZE;
             dq.data[i] = x;
             dq.len += 1;
         }
@@ -62,7 +64,7 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
             std.debug.assert(dq.len > 0);
 
             const x = dq.front();
-            dq.start = (dq.start + 1) % SIZE;
+            dq.start = (dq.start +% 1) % SIZE;
             dq.len -= 1;
             return x;
         }
@@ -94,17 +96,17 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
             if (i > SIZE / 2) {
                 var j = dq.len;
                 while (j >= i) : (j -= 1) {
-                    dq.data[(dq.start + j) % SIZE] = dq.data[(dq.start + j - 1) % SIZE];
+                    dq.data[(dq.start +% j) % SIZE] = dq.data[(dq.start +% j -% 1) % SIZE];
                 }
             } else {
                 var j: u32 = 0;
                 while (j < i) : (j += 1) {
-                    dq.data[(dq.start + j + SIZE - 1) % SIZE] = dq.data[(dq.start + j) % SIZE];
+                    dq.data[(dq.start + j +% SIZE -% 1) % SIZE] = dq.data[(dq.start +% j) % SIZE];
                 }
-                dq.start = (dq.start + SIZE - 1) % SIZE;
+                dq.start = (dq.start +% SIZE -% 1) % SIZE;
             }
 
-            dq.data[(dq.start + i) % SIZE] = x;
+            dq.data[(dq.start +% i) % SIZE] = x;
             dq.len += 1;
         }
 
@@ -127,14 +129,14 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
             if (i > SIZE / 2) {
                 var j = i;
                 while (j < dq.len - 1) : (j += 1) {
-                    dq.data[(dq.start + j) % SIZE] = dq.data[(dq.start + j + 1) % SIZE];
+                    dq.data[(dq.start +% j) % SIZE] = dq.data[(dq.start +% j +% 1) % SIZE];
                 }
             } else {
                 var j = i;
                 while (j > 0) : (j -= 1) {
-                    dq.data[(dq.start + j) % SIZE] = dq.data[(dq.start + j + SIZE - 1) % SIZE];
+                    dq.data[(dq.start +% j) % SIZE] = dq.data[(dq.start +% j +% SIZE -% 1) % SIZE];
                 }
-                dq.start = (dq.start + 1) % SIZE;
+                dq.start = (dq.start +% 1) % SIZE;
             }
 
             dq.len -= 1;
@@ -142,39 +144,57 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
         }
 
         /// assumes the deque is sorted
-        pub fn lowerBound(dq: *Deque, x: u32) T {
-            var left: u32 = 0;
-            var right: u32 = dq.len;
-            while (left < right) {
-                const mid = left + (right - left) / 2;
-                if (dq.at(mid) >= x) {
-                    right = mid;
-                } else {
-                    left = mid + 1;
+        pub fn lowerBound(dq: *Deque, x: T) u32 {
+            if (SIZE <= LINEAR_VS_BINARY_CUTOFF) {
+                //  linear counting
+                var count: u32 = 0;
+                for (0..dq.len) |i| {
+                    count += if (dq.at(@intCast(i)) < x) 1 else 0;
                 }
+                return count;
+            } else {
+                // binary search
+                var left: u32 = 0;
+                var right: u32 = dq.len;
+                while (left < right) {
+                    const mid = left + (right - left) / 2;
+                    if (dq.at(mid) >= x) {
+                        right = mid;
+                    } else {
+                        left = mid + 1;
+                    }
+                }
+                return left;
             }
-
-            return left;
         }
 
         /// assumes the deque is sorted
-        pub fn upperBound(dq: *Deque, x: u32) T {
-            var left: u32 = 0;
-            var right: u32 = dq.len;
-            while (left < right) {
-                const mid = left + (right - left) / 2;
-                if (dq.at(mid) > x) {
-                    right = mid;
-                } else {
-                    left = mid + 1;
+        pub fn upperBound(dq: *Deque, x: T) u32 {
+            if (SIZE <= LINEAR_VS_BINARY_CUTOFF) {
+                // counting
+                var count: u32 = 0;
+                for (0..dq.len) |i| {
+                    count += if (dq.at(@intCast(i)) <= x) 1 else 0;
                 }
+                return count;
+            } else {
+                // binary search
+                var left: u32 = 0;
+                var right: u32 = dq.len;
+                while (left < right) {
+                    const mid = left + (right - left) / 2;
+                    if (dq.at(mid) > x) {
+                        right = mid;
+                    } else {
+                        left = mid + 1;
+                    }
+                }
+                return left;
             }
-
-            return left;
         }
 
         /// inserts in such a way that the deque remains sorted
-        pub inline fn insertSorted(dq: *Deque, x: u32) void {
+        pub inline fn insertSorted(dq: *Deque, x: T) void {
             dq.insert(dq.lowerBound(x), x);
         }
 
@@ -269,4 +289,43 @@ test "insert erase" {
     dq.insert(5, 12);
 
     // std.debug.print("{} {any} {} {}\n", .{ dq, dq.data, dq.len, dq.start });
+}
+
+test "bounds" {
+    var dq = FixedDeque(8, u32){};
+
+    dq.pushFront(12);
+    dq.pushFront(10);
+    dq.pushFront(8);
+    dq.pushFront(6);
+    dq.pushFront(4);
+    dq.pushFront(2);
+
+    try std.testing.expectEqual(0, dq.lowerBound(1));
+    try std.testing.expectEqual(0, dq.lowerBound(2));
+    try std.testing.expectEqual(1, dq.lowerBound(3));
+    try std.testing.expectEqual(1, dq.lowerBound(4));
+    try std.testing.expectEqual(2, dq.lowerBound(5));
+    try std.testing.expectEqual(2, dq.lowerBound(6));
+    try std.testing.expectEqual(3, dq.lowerBound(7));
+    try std.testing.expectEqual(3, dq.lowerBound(8));
+    try std.testing.expectEqual(4, dq.lowerBound(9));
+    try std.testing.expectEqual(4, dq.lowerBound(10));
+    try std.testing.expectEqual(5, dq.lowerBound(11));
+    try std.testing.expectEqual(5, dq.lowerBound(12));
+    try std.testing.expectEqual(6, dq.lowerBound(13));
+
+    try std.testing.expectEqual(0, dq.upperBound(1));
+    try std.testing.expectEqual(1, dq.upperBound(2));
+    try std.testing.expectEqual(1, dq.upperBound(3));
+    try std.testing.expectEqual(2, dq.upperBound(4));
+    try std.testing.expectEqual(2, dq.upperBound(5));
+    try std.testing.expectEqual(3, dq.upperBound(6));
+    try std.testing.expectEqual(3, dq.upperBound(7));
+    try std.testing.expectEqual(4, dq.upperBound(8));
+    try std.testing.expectEqual(4, dq.upperBound(9));
+    try std.testing.expectEqual(5, dq.upperBound(10));
+    try std.testing.expectEqual(5, dq.upperBound(11));
+    try std.testing.expectEqual(6, dq.upperBound(12));
+    try std.testing.expectEqual(6, dq.upperBound(13));
 }

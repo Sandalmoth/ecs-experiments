@@ -261,7 +261,12 @@ pub fn Storage(
                 if (height == 1) {
                     return lp(node.children.at(loc)).get(key);
                 } else {
-                    return np(node.children.at(loc)).get(height - 1, key);
+                    return @call(
+                        .always_tail,
+                        Node.get,
+                        .{ np(node.children.at(loc)), height - 1, key },
+                    );
+                    // return np(node.children.at(loc)).get(height - 1, key);
                 }
             }
 
