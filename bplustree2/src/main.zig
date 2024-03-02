@@ -62,20 +62,25 @@ pub fn Storage(
 
                 if (height == 1) {
                     const overflow = lp(node.children.at(loc)).add(key, val);
-                    if (overflow) {
+                    if (!overflow) {
+                        node.keys.set(loc, lp(node.children.at(loc)).keys.front());
+                    } else {
                         const next = try lp(node.children.at(loc)).split(alloc);
                         node.keys.insert(loc + 1, next.keys.front());
                         node.children.insert(loc + 1, @intFromPtr(next));
                     }
                 } else {
                     const overflow = try np(node.children.at(loc)).add(alloc, height - 1, key, val);
-                    if (overflow) {
+                    if (!overflow) {
+                        node.keys.set(loc, np(node.children.at(loc)).keys.front());
+                    } else {
                         const next = try np(node.children.at(loc)).split(alloc);
                         node.keys.insert(loc + 1, next.keys.front());
                         node.children.insert(loc + 1, @intFromPtr(next));
                     }
                 }
 
+                std.debug.assert(node.keys.isSorted());
                 return node.children.len > NODE_SIZE;
             }
 
@@ -88,6 +93,8 @@ pub fn Storage(
                     next.children.pushFront(node.children.popBack());
                 }
 
+                std.debug.assert(node.keys.isSorted());
+                std.debug.assert(next.keys.isSorted());
                 return next;
             }
 
@@ -229,6 +236,7 @@ pub fn Storage(
                     }
                 }
 
+                std.debug.assert(node.keys.isSorted());
                 return node.children.len <= NODE_SIZE / 2;
             }
 
@@ -238,7 +246,23 @@ pub fn Storage(
                     node.children.pushBack(next.children.popFront());
                 }
 
+                std.debug.assert(node.keys.isSorted());
                 next.destroy(alloc, height);
+            }
+
+            fn get(node: *Node, height: usize, key: K) ?*V {
+                const loc = blk: {
+                    if (key < node.keys.front()) {
+                        break :blk 0;
+                    }
+                    break :blk node.keys.upperBound(key) - 1;
+                };
+
+                if (height == 1) {
+                    return lp(node.children.at(loc)).get(key);
+                } else {
+                    return np(node.children.at(loc)).get(height - 1, key);
+                }
             }
 
             fn _debugPrint(node: *Node, height: usize, depth: usize) void {
@@ -288,6 +312,7 @@ pub fn Storage(
                 leaf.vals.insert(loc, val);
 
                 std.debug.assert(leaf.keys.len == leaf.vals.len);
+                std.debug.assert(leaf.keys.isSorted());
                 return leaf.keys.len > LEAF_SIZE;
             }
 
@@ -308,6 +333,8 @@ pub fn Storage(
                     next.next.?.prev = next;
                 }
 
+                std.debug.assert(leaf.keys.isSorted());
+                std.debug.assert(next.keys.isSorted());
                 return next;
             }
 
@@ -319,6 +346,7 @@ pub fn Storage(
                 _ = leaf.vals.remove(loc);
 
                 std.debug.assert(leaf.keys.len == leaf.vals.len);
+                std.debug.assert(leaf.keys.isSorted());
                 return leaf.keys.len <= LEAF_SIZE / 2;
             }
 
@@ -334,7 +362,21 @@ pub fn Storage(
                     next.next.?.prev = leaf;
                 }
 
+                std.debug.assert(leaf.keys.isSorted());
                 next.destroy(alloc);
+            }
+
+            fn get(leaf: *Leaf, key: K) ?*V {
+                if (leaf.keys.len == 0) {
+                    return null;
+                }
+
+                const loc = leaf.keys.lowerBound(key);
+                if (loc < leaf.keys.len and leaf.keys.at(loc) == key) {
+                    return leaf.vals.ptr(loc);
+                }
+
+                return null;
             }
 
             fn _debugPrint(leaf: *Leaf, depth: usize) void {
@@ -443,6 +485,61 @@ pub fn Storage(
             storage.len -= 1;
         }
 
+        pub fn get(storage: *Self, key: K) ?*V {
+            if (storage.root == 0) {
+                return null;
+            }
+
+            if (storage.height == 0) {
+                return lp(storage.root).get(key);
+            } else {
+                return np(storage.root).get(storage.height, key);
+            }
+        }
+
+        pub inline fn has(storage: *Self, key: u32) bool {
+            return storage.get(key) != null;
+        }
+
+        const Iterator = struct {
+            const KV = struct { key: K, val: V };
+
+            leaf: ?*Leaf,
+            cursor: usize = 0,
+
+            pub fn next(it: *Iterator) ?KV {
+                if (it.leaf == null) {
+                    return null;
+                }
+
+                const result = KV{
+                    .key = it.leaf.?.keys.at(@intCast(it.cursor)),
+                    .val = it.leaf.?.vals.at(@intCast(it.cursor)),
+                };
+
+                it.cursor += 1;
+                while (it.leaf != null and it.cursor == it.leaf.?.keys.len) {
+                    it.cursor = 0;
+                    it.leaf = it.leaf.?.next;
+                }
+
+                return result;
+            }
+        };
+
+        pub fn iterator(storage: *Self) Iterator {
+            if (storage.height == 0) {
+                return .{ .leaf = lp(storage.root) };
+            }
+
+            var walk = storage.root;
+            var h = storage.height;
+            while (h > 0) : (h -= 1) {
+                walk = np(walk).children.front();
+            }
+            return .{ .leaf = lp(walk) };
+        }
+
         fn np(ptr: usize) *Node {
             std.debug.assert(ptr != 0);
             return @ptrFromInt(ptr);
@@ -477,25 +574,29 @@ pub fn main() !void {
     std.debug.print("{}\n", .{@sizeOf(@TypeOf(s).Node)});
     std.debug.print("{}\n", .{@sizeOf(@TypeOf(s).Leaf)});
 
-    const n = 8;
+    const n = 16;
     for (0..n) |i| {
-        // std.debug.print("\ninserting {}\n", .{i});
-        // try s.add(@intCast(i), @floatFromInt(i));
-        // std.debug.print("\ninserting {}\n", .{i * 89 % n});
         try s.add(@intCast(i * 2_654_435_761 % n), @floatFromInt(i));
-        // s.debugPrint();
     }
     s.debugPrint();
 
     for (0..n) |i| {
-        // std.debug.print("\ndeleting {}\n", .{i});
-        // s.del(@intCast(i));
-        // std.debug.print("\ndeleting {}\n", .{n - i - 1});
-        // s.del(@intCast(n - i - 1));
-        std.debug.print("\ndeleting {}\n", .{i * 2_654_435_761 % n});
-        s.del(@intCast(i * 2_654_435_761 % n));
-        s.debugPrint();
+        std.debug.assert(s.get(@intCast(i * 2_654_435_761 % n)).?.* == @as(f32, @floatFromInt(i)));
     }
+
+    for (0..n) |i| {
+        if (i % 2 == 0) continue;
+        s.del(@intCast(i * 2_654_435_761 % n));
+    }
+
+    for (0..n) |i| {
+        if (i % 2 == 0) {
+            std.debug.assert(s.get(@intCast(i * 2_654_435_761 % n)).?.* == @as(f32, @floatFromInt(i)));
+        } else {
+            std.debug.assert(s.get(@intCast(i * 2_654_435_761 % n)) == null);
+        }
+    }
+    s.debugPrint();
 
     // some fuzz tests just to see that we don't hit a crash/assert
     std.debug.print("\ncommencing fuzz tests!\n", .{});
@@ -512,6 +613,10 @@ pub fn main() !void {
         }
 
         for (0..fuzz_lim) |i| {
+            std.debug.assert(_s.get(@intCast(i)).?.* == @as(f32, @floatFromInt(i)));
+        }
+
+        for (0..fuzz_lim) |i| {
             _ = _s.del(@intCast(i));
         }
     }
@@ -522,6 +627,10 @@ pub fn main() !void {
 
         for (0..fuzz_lim) |i| {
             try _s.add(fuzz_lim - @as(u32, @intCast(i)), @floatFromInt(i));
+        }
+
+        for (0..fuzz_lim) |i| {
+            std.debug.assert(_s.get(@intCast(fuzz_lim - i)).?.* == @as(f32, @floatFromInt(i)));
         }
 
         for (0..fuzz_lim) |i| {
@@ -540,6 +649,12 @@ pub fn main() !void {
         }
 
         x = 0;
+        for (0..fuzz_lim) |i| {
+            std.debug.assert(_s.get(x % fuzz_lim).?.* == @as(f32, @floatFromInt(i)));
+            x +%= 2_654_435_761;
+        }
+
+        x = 0;
         for (0..fuzz_lim) |_| {
             _ = _s.del(x % fuzz_lim);
             x +%= 2_654_435_761;
@@ -547,4 +662,55 @@ pub fn main() !void {
     }
 
     std.debug.print("fuzz tests finished!\n", .{});
+}
+
+test "fuzz" {
+    var s = Storage(u32, u32, 31, 15).init(std.testing.allocator);
+    defer s.deinit();
+
+    var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
+
+    for (0..100_000) |_| {
+        const k = rng.random().int(u16);
+        if (s.get(k)) |v| {
+            try std.testing.expectEqual(k, v.*);
+            s.del(k);
+        } else {
+            try s.add(k, k);
+        }
+    }
+
+    if (s.len > 1) {
+        var it = s.iterator();
+        var x = it.next().?.key;
+        var j: usize = 1;
+        while (it.next()) |y| {
+            try std.testing.expect(x < y.key);
+            x = y.key;
+            j += 1;
+        }
+        try std.testing.expectEqual(s.len, j);
+    }
+
+    for (0..100_000) |_| {
+        const k = rng.random().int(u16);
+        if (s.get(k)) |v| {
+            try std.testing.expectEqual(k, v.*);
+            s.del(k);
+        } else {
+            try s.add(k, k);
+        }
+    }
+
+    if (s.len > 1) {
+        var it = s.iterator();
+        var x = it.next().?.key;
+        var j: usize = 1;
+        while (it.next()) |y| {
+            try std.testing.expect(x < y.key);
+            x = y.key;
+            j += 1;
+        }
+        try std.testing.expectEqual(s.len, j);
+    }
 }

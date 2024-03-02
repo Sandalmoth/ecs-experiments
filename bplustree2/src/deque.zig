@@ -18,6 +18,12 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
             return dq.data[(dq.start + i) % SIZE];
         }
 
+        pub inline fn ptr(dq: *Deque, i: u32) *T {
+            std.debug.assert(i < dq.len);
+
+            return &dq.data[(dq.start + i) % SIZE];
+        }
+
         pub inline fn set(dq: *Deque, i: u32, x: T) void {
             std.debug.assert(i < dq.len);
 
@@ -170,6 +176,22 @@ pub fn FixedDeque(comptime SIZE: comptime_int, comptime T: type) type {
         /// inserts in such a way that the deque remains sorted
         pub inline fn insertSorted(dq: *Deque, x: u32) void {
             dq.insert(dq.lowerBound(x), x);
+        }
+
+        /// checks that deque is sorted with no duplicates
+        pub fn isSorted(dq: Deque) bool {
+            if (dq.len < 2) {
+                return true;
+            }
+
+            var x = dq.front();
+            for (1..dq.len) |i| {
+                if (x >= dq.at(@intCast(i))) {
+                    return false;
+                }
+                x = dq.at(@intCast(i));
+            }
+            return true;
         }
 
         pub fn format(
