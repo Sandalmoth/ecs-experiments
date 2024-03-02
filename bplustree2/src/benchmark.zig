@@ -17,11 +17,14 @@ fn bench3(alloc: std.mem.Allocator) !void {
     var acc: u64 = 0;
     var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
 
-    var s0 = Storage(u32, u32, 31, 15).init(alloc);
+    const node_size = 31;
+    const leaf_size = 15;
+
+    var s0 = Storage(u32, u32, node_size, leaf_size).init(alloc);
     defer s0.deinit();
-    var s1 = Storage(u32, u32, 31, 15).init(alloc);
+    var s1 = Storage(u32, u32, node_size, leaf_size).init(alloc);
     defer s1.deinit();
-    var s2 = Storage(u32, u32, 31, 15).init(alloc);
+    var s2 = Storage(u32, u32, node_size, leaf_size).init(alloc);
     defer s2.deinit();
 
     std.debug.print("len_1\tlen_2\tlen_3\tindel\titer_1\titer_12\titer_123\n", .{});
