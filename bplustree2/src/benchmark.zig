@@ -24,9 +24,9 @@ fn bench3(alloc: std.mem.Allocator) !void {
     var s2 = Storage(u32, u32, 31, 15).init(alloc);
     defer s2.deinit();
 
-    std.debug.print("len_1\tlen_2\tlen_3\tindel\titer_1\titer_2\titer_3\n", .{});
+    std.debug.print("len_1\tlen_2\tlen_3\tindel\titer_1\titer_12\titer_123\n", .{});
 
-    for (6..21) |log_n| {
+    for (6..22) |log_n| {
         const n: u32 = @as(u32, 1) << @intCast(log_n);
 
         var timer = try std.time.Timer.start();
@@ -71,7 +71,7 @@ fn bench3(alloc: std.mem.Allocator) !void {
             x.?.* *%= (y.?.* +% kv.val);
         }
 
-        const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
+        const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s2.len));
 
         var it1 = s1.iterator();
         while (it1.next()) |kv| {
@@ -80,14 +80,14 @@ fn bench3(alloc: std.mem.Allocator) !void {
             x.?.* +%= kv.val;
         }
 
-        const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
+        const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s1.len));
 
         var it0 = s0.iterator();
         while (it0.next()) |kv| {
             acc += kv.val;
         }
 
-        const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
+        const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0.len));
 
         std.debug.print(
             "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
