@@ -270,6 +270,25 @@ pub fn Storage(
                 }
             }
 
+            fn getLeaf(node: *Node, height: usize, key: K) ?*Leaf {
+                const loc = blk: {
+                    if (key < node.keys.front()) {
+                        break :blk 0;
+                    }
+                    break :blk node.keys.upperBound(key) - 1;
+                };
+
+                if (height == 1) {
+                    return lp(node.children.at(loc));
+                } else {
+                    return @call(
+                        .always_tail,
+                        Node.getLeaf,
+                        .{ np(node.children.at(loc)), height - 1, key },
+                    );
+                }
+            }
+
             fn _debugPrint(node: *Node, height: usize, depth: usize) void {
                 std.debug.assert(height > 0);
                 for (0..depth) |_| std.debug.print("  ", .{});
@@ -502,6 +521,18 @@ pub fn Storage(
             }
         }
 
+        fn getLeaf(storage: *Self, key: K) ?*Leaf {
+            if (storage.root == 0) {
+                return null;
+            }
+
+            if (storage.height == 0) {
+                return lp(storage.root);
+            } else {
+                return np(storage.root).getLeaf(storage.height, key);
+            }
+        }
+
         pub inline fn has(storage: *Self, key: u32) bool {
             return storage.get(key) != null;
         }
@@ -543,6 +574,33 @@ pub fn Storage(
                 walk = np(walk).children.front();
             }
             return .{ .leaf = lp(walk) };
+        }
+
+        const Query = struct {
+            storage: *Self,
+            leaf: ?*Leaf,
+
+            pub fn get(q: *Query, key: K) ?*V {
+                if (q.leaf) |leaf| {
+                    const result = leaf.get(key);
+                    if (result != null) {
+                        return result;
+                    }
+                    q.leaf = null;
+                }
+
+                q.leaf = q.storage.getLeaf(key);
+                if (q.leaf) |leaf| {
+                    return leaf.get(key);
+                }
+                return null;
+            }
+        };
+
+        // returns a struct that can be used for more efficient get operations
+        // assuming spatio-temporal locality
+        pub fn query(storage: *Self) Query {
+            return .{ .storage = storage, .leaf = null };
         }
 
         fn np(ptr: usize) *Node {

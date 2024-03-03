@@ -64,12 +64,17 @@ fn bench3(alloc: std.mem.Allocator) !void {
 
         const t_indel = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
 
+        var q0 = s0.query();
+        var q1 = s1.query();
+
         // then do some iteration passes over one component while fetching the others
         var it2 = s2.iterator();
         while (it2.next()) |kv| {
-            const x = s0.get(kv.key);
+            // const x = s0.get(kv.key);
+            const x = q0.get(kv.key);
             if (x == null) continue;
-            const y = s1.get(kv.key);
+            // const y = s1.get(kv.key);
+            const y = q1.get(kv.key);
             if (y == null) continue;
             x.?.* *%= (y.?.* +% kv.val);
         }
@@ -78,7 +83,8 @@ fn bench3(alloc: std.mem.Allocator) !void {
 
         var it1 = s1.iterator();
         while (it1.next()) |kv| {
-            const x = s0.get(kv.key);
+            // const x = s0.get(kv.key);
+            const x = q0.get(kv.key);
             if (x == null) continue;
             x.?.* +%= kv.val;
         }
