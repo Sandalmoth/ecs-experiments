@@ -1,6 +1,7 @@
 const std = @import("std");
 
-const Deque = @import("deque.zig").FixedDeque;
+// const Deque = @import("deque.zig").FixedDeque;
+const Deque = @import("array.zig").FixedArray;
 
 // i like the b+tree design, so i'm gonna try to rewrite it better
 // it may or may not be a good idea, but I'm gonna try using deques in all the nodes/leaves

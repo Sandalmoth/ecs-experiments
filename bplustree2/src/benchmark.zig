@@ -1,6 +1,7 @@
 const std = @import("std");
 const Storage = @import("main.zig").Storage;
-const Deque = @import("deque.zig").FixedDeque;
+// const Deque = @import("deque.zig").FixedDeque;
+const Deque = @import("array.zig").FixedArray;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -18,7 +19,7 @@ fn bench3(alloc: std.mem.Allocator) !void {
     var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
 
     const node_size = 31;
-    const leaf_size = 15;
+    const leaf_size = 31;
 
     std.debug.print("len_1\tlen_2\tlen_3\tindel\titer_1\titer_12\titer_123\n", .{});
 
