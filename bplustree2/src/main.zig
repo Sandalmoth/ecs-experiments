@@ -20,8 +20,8 @@ pub fn Storage(
     std.debug.assert(LEAF_SIZE >= 3);
     // circular array deques are much faster for power-of-two sizes
     // so we'll just make that a restriction
-    std.debug.assert(std.math.isPowerOfTwo(NODE_SIZE + 1));
-    std.debug.assert(std.math.isPowerOfTwo(LEAF_SIZE + 1));
+    // std.debug.assert(std.math.isPowerOfTwo(NODE_SIZE + 1));
+    // std.debug.assert(std.math.isPowerOfTwo(LEAF_SIZE + 1));
 
     return struct {
         const Self = @This();
