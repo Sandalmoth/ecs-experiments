@@ -3,7 +3,9 @@ const utl = @import("utils.zig");
 
 pub fn Storage(comptime V: type, comptime LEAF_SIZE: comptime_int) type {
     const K = u32;
-    const NODE_SIZE = 48;
+    // const NODE_SIZE = 10; // 64 byte node
+    const NODE_SIZE = 22; // 128 byte node
+    // const NODE_SIZE = 48; // 256 byte node
 
     return struct {
         const Self = @This();
@@ -111,8 +113,8 @@ pub fn Storage(comptime V: type, comptime LEAF_SIZE: comptime_int) type {
                     const next: usize = @intFromPtr(&np(node.children).nodes[node.indirect[this]]);
                     @prefetch(@as(*usize, @ptrFromInt(next)), .{});
                     @prefetch(@as(*usize, @ptrFromInt(next + 64)), .{});
-                    @prefetch(@as(*usize, @ptrFromInt(next + 128)), .{});
-                    @prefetch(@as(*usize, @ptrFromInt(next + 192)), .{});
+                    // @prefetch(@as(*usize, @ptrFromInt(next + 128)), .{});
+                    // @prefetch(@as(*usize, @ptrFromInt(next + 192)), .{});
                     return @call(
                         .always_tail,
                         Node.get,
@@ -147,7 +149,6 @@ pub fn Storage(comptime V: type, comptime LEAF_SIZE: comptime_int) type {
             }
 
             fn _debugPrint(node: Node, height: usize, depth: usize) void {
-                // FIXME indirection
                 std.debug.assert(height > 0);
                 std.debug.assert(node.children != 0);
                 for (0..depth) |_| std.debug.print("  ", .{});
@@ -238,7 +239,9 @@ pub fn Storage(comptime V: type, comptime LEAF_SIZE: comptime_int) type {
         };
 
         comptime {
-            std.debug.assert(@sizeOf(Node) <= 256);
+            // std.debug.assert(@sizeOf(Node) <= 64);
+            std.debug.assert(@sizeOf(Node) <= 128);
+            // std.debug.assert(@sizeOf(Node) <= 256);
         }
 
         alloc: std.mem.Allocator,
