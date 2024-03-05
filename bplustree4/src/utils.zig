@@ -51,6 +51,18 @@ pub fn lowerBound(comptime T: type, a: [*]T, len: u32, x: T) u32 {
         count += if (a[i] < x) 1 else 0;
     }
     return count;
+
+    // var left: u32 = 0;
+    // var right: u32 = len;
+    // while (left < right) {
+    //     const mid = left + (right - left) / 2;
+    //     if (a[mid] >= x) {
+    //         right = mid;
+    //     } else {
+    //         left = mid + 1;
+    //     }
+    // }
+    // return left;
 }
 
 pub fn upperBound(comptime T: type, a: [*]T, len: u32, x: T) u32 {
@@ -59,4 +71,48 @@ pub fn upperBound(comptime T: type, a: [*]T, len: u32, x: T) u32 {
         count += if (a[i] <= x) 1 else 0;
     }
     return count;
+
+    // var left: u32 = 0;
+    // var right: u32 = len;
+    // while (left < right) {
+    //     const mid = left + (right - left) / 2;
+    //     if (a[mid] > x) {
+    //         right = mid;
+    //     } else {
+    //         left = mid + 1;
+    //     }
+    // }
+    // return left;
+}
+
+test "bounds" {
+    var a: [6]u32 = .{ 2, 4, 6, 8, 10, 12 };
+
+    try std.testing.expectEqual(0, lowerBound(u32, &a, 6, 1));
+    try std.testing.expectEqual(0, lowerBound(u32, &a, 6, 2));
+    try std.testing.expectEqual(1, lowerBound(u32, &a, 6, 3));
+    try std.testing.expectEqual(1, lowerBound(u32, &a, 6, 4));
+    try std.testing.expectEqual(2, lowerBound(u32, &a, 6, 5));
+    try std.testing.expectEqual(2, lowerBound(u32, &a, 6, 6));
+    try std.testing.expectEqual(3, lowerBound(u32, &a, 6, 7));
+    try std.testing.expectEqual(3, lowerBound(u32, &a, 6, 8));
+    try std.testing.expectEqual(4, lowerBound(u32, &a, 6, 9));
+    try std.testing.expectEqual(4, lowerBound(u32, &a, 6, 10));
+    try std.testing.expectEqual(5, lowerBound(u32, &a, 6, 11));
+    try std.testing.expectEqual(5, lowerBound(u32, &a, 6, 12));
+    try std.testing.expectEqual(6, lowerBound(u32, &a, 6, 13));
+
+    try std.testing.expectEqual(0, upperBound(u32, &a, 6, 1));
+    try std.testing.expectEqual(1, upperBound(u32, &a, 6, 2));
+    try std.testing.expectEqual(1, upperBound(u32, &a, 6, 3));
+    try std.testing.expectEqual(2, upperBound(u32, &a, 6, 4));
+    try std.testing.expectEqual(2, upperBound(u32, &a, 6, 5));
+    try std.testing.expectEqual(3, upperBound(u32, &a, 6, 6));
+    try std.testing.expectEqual(3, upperBound(u32, &a, 6, 7));
+    try std.testing.expectEqual(4, upperBound(u32, &a, 6, 8));
+    try std.testing.expectEqual(4, upperBound(u32, &a, 6, 9));
+    try std.testing.expectEqual(5, upperBound(u32, &a, 6, 10));
+    try std.testing.expectEqual(5, upperBound(u32, &a, 6, 11));
+    try std.testing.expectEqual(6, upperBound(u32, &a, 6, 12));
+    try std.testing.expectEqual(6, upperBound(u32, &a, 6, 13));
 }
