@@ -45,6 +45,16 @@ pub fn remove(comptime T: type, a: [*]T, len: u32, i: u32) T {
     return result;
 }
 
+// It lower_bound(It begin, It end, const T& value, Cmp comp) {
+//     size_t n = end - begin;
+//     size_t b = 0;
+//     for (size_t bit = std::bit_floor(n); bit != 0; bit >>= 1) {
+//         size_t i = (b | bit) - 1;
+//         if (i < n && comp(begin[i], value)) b |= bit;
+//     }
+//     return begin + b;
+// }
+
 pub fn lowerBound(comptime T: type, a: [*]T, len: u32, x: T) u32 {
     var count: u32 = 0;
     for (0..len) |i| {
@@ -55,14 +65,24 @@ pub fn lowerBound(comptime T: type, a: [*]T, len: u32, x: T) u32 {
     // var left: u32 = 0;
     // var right: u32 = len;
     // while (left < right) {
-    //     const mid = left + (right - left) / 2;
+    //     const mid = (left +% right) / 2;
     //     if (a[mid] >= x) {
     //         right = mid;
     //     } else {
-    //         left = mid + 1;
+    //         left = mid +% 1;
     //     }
     // }
     // return left;
+
+    // var b: u32 = 0;
+    // var bit = std.math.floorPowerOfTwo(u32, len);
+    // while (bit != 0) : (bit >>= 1) {
+    //     const i: u32 = (b | bit) -% 1;
+    //     if (i < len and a[i] < x) {
+    //         b |= bit;
+    //     }
+    // }
+    // return b;
 }
 
 pub fn upperBound(comptime T: type, a: [*]T, len: u32, x: T) u32 {
