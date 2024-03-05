@@ -45,6 +45,7 @@ pub fn remove(comptime T: type, a: [*]T, len: u32, i: u32) T {
     return result;
 }
 
+// https://orlp.net/blog/bitwise-binary-search/
 // It lower_bound(It begin, It end, const T& value, Cmp comp) {
 //     size_t n = end - begin;
 //     size_t b = 0;
