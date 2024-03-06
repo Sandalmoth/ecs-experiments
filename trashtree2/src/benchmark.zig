@@ -14,7 +14,7 @@ fn bench5(alloc: std.mem.Allocator) !void {
     var acc: u64 = 0;
     var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
 
-    std.debug.print("len_1\tlen_2\tlen_3\tins\titer_1\titer_12\titer_123\n", .{});
+    std.debug.print("len_1\tlen_2\tlen_3\tins\titr_1\titr_12\titr_123\t%_hget\n", .{});
 
     for (6..22) |log_n| {
         const n: u32 = @as(u32, 1) << @intCast(log_n);
@@ -80,9 +80,12 @@ fn bench5(alloc: std.mem.Allocator) !void {
 
         const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0.len));
 
+        const get_total: f64 = @floatFromInt(@import("main.zig").get_total);
+        const get_leaf: f64 = @floatFromInt(@import("main.zig").get_leaf);
+
         std.debug.print(
-            "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
-            .{ s0.len, s1.len, s2.len, t_ins, t_it0, t_it1, t_it2 },
+            "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
+            .{ s0.len, s1.len, s2.len, t_ins, t_it0, t_it1, t_it2, 100 * get_leaf / get_total },
         );
     }
 

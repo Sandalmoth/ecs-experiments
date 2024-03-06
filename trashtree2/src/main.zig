@@ -9,6 +9,10 @@ const utl = @import("utils.zig");
 // and if a hashmap page gets too full, we split it by the median key
 // and update the index to match the new key ranges
 
+const measure_get = false;
+pub var get_total: u64 = 0;
+pub var get_leaf: u64 = 0;
+
 pub fn Storage(
     comptime K: type,
     comptime V: type,
@@ -61,17 +65,20 @@ pub fn Storage(
             }
 
             fn get(page: *Page, key: K) ?*V {
+                var timer: std.time.Timer = if (measure_get) std.time.Timer.start() catch unreachable else undefined;
                 var loc = std.hash.uint32(key) % PAGE_SIZE;
-
+                var result: ?*V = null;
                 for (0..PAGE_SIZE) |_| {
                     if (page.keys[loc] == key) {
-                        return &page.vals[loc];
+                        result = &page.vals[loc];
+                        break;
                     } else if (page.keys[loc] == nil) {
-                        return null;
+                        break;
                     }
                     loc = (loc + 1) % PAGE_SIZE;
                 }
-                return null;
+                if (measure_get) get_leaf += timer.read();
+                return result;
             }
 
             const Iterator = struct {
@@ -164,12 +171,15 @@ pub fn Storage(
             }
 
             fn get(index: *Index, key: K) ?*V {
+                var timer: std.time.Timer = if (measure_get) std.time.Timer.start() catch unreachable else undefined;
                 const loc: u32 = @min(
                     utl.lowerBound(K, &index.limits, @intCast(index.n_pages), key),
                     @as(u32, @intCast(index.n_pages - 1)),
                 );
 
-                return index.pages[loc].?.get(key);
+                const result = index.pages[loc].?.get(key);
+                if (measure_get) get_total += timer.read();
+                return result;
             }
 
             fn debugPrint(index: *Index) void {

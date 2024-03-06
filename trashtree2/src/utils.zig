@@ -49,23 +49,23 @@ pub fn remove(comptime T: type, a: [*]T, len: u32, i: u32) T {
 }
 
 pub fn lowerBound(comptime T: type, a: [*]T, len: u32, x: T) u32 {
-    var count: u32 = 0;
-    for (0..len) |i| {
-        count += if (a[i] < x) 1 else 0;
-    }
-    return count;
-
-    // var left: u32 = 0;
-    // var right: u32 = len;
-    // while (left < right) {
-    //     const mid = (left +% right) / 2;
-    //     if (a[mid] >= x) {
-    //         right = mid;
-    //     } else {
-    //         left = mid +% 1;
-    //     }
+    // var count: u32 = 0;
+    // for (0..len) |i| {
+    //     count +%= if (a[i] < x) 1 else 0;
     // }
-    // return left;
+    // return count;
+
+    var left: u32 = 0;
+    var right: u32 = len;
+    while (left < right) {
+        const mid = (left +% right) / 2;
+        if (a[mid] >= x) {
+            right = mid;
+        } else {
+            left = mid +% 1;
+        }
+    }
+    return left;
 
     // var b: u32 = 0;
     // var bit = std.math.floorPowerOfTwo(u32, len);
