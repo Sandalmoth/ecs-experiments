@@ -206,10 +206,12 @@ pub fn Storage(
                     min_load = @min(min_load, index.pages[i].?.load());
                     max_load = @max(max_load, index.pages[i].?.load());
                 }
-                std.debug.print(
-                    "load - min: {d:.2}\tmean: {d:.2}\tmax: {d:.2}\n",
-                    .{ min_load, mean_load / @as(f32, @floatFromInt(index.n_pages)), max_load },
-                );
+                std.debug.print("load ({} pages)\tmin: {d:.2}\tmean: {d:.2}\tmax: {d:.2}\n", .{
+                    index.n_pages,
+                    min_load,
+                    mean_load / @as(f32, @floatFromInt(index.n_pages)),
+                    max_load,
+                });
             }
         };
 
