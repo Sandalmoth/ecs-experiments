@@ -33,7 +33,7 @@ pub fn Storage(
             len: usize,
             min: K,
             max: K,
-            // some way to estimate median for uneven distributions
+            mean: f64, // no estimate is terrible, try a mean
 
             fn create(alloc: std.mem.Allocator) !*Page {
                 var page = try alloc.create(Page);
@@ -61,6 +61,12 @@ pub fn Storage(
                 page.vals[loc] = val;
                 page.min = @min(page.min, key);
                 page.max = @max(page.max, key);
+
+                page.mean = if (page.len == 0)
+                    @floatFromInt(key)
+                else
+                    page.mean + (@as(f64, @floatFromInt(key)) - page.mean) / @as(f64, @floatFromInt(page.len));
+
                 page.len += 1;
             }
 
@@ -143,7 +149,8 @@ pub fn Storage(
                     errdefer low.destroy(alloc);
                     const high = try Page.create(alloc);
                     const full = index.pages[loc].?;
-                    const median = full.min + (full.max - full.min) / 2;
+                    // const median = full.min + (full.max - full.min) / 2;
+                    const median: K = @intFromFloat(full.mean);
 
                     var it = full.iterator();
                     while (it.next()) |kv| {
@@ -187,6 +194,22 @@ pub fn Storage(
                 for (0..index.n_pages) |i| {
                     index.pages[i].?.debugPrint();
                 }
+            }
+
+            fn loadSummary(index: *Index) void {
+                var min_load = index.pages[0].?.load();
+                var max_load = index.pages[0].?.load();
+                var mean_load: f32 = 0;
+
+                for (0..index.n_pages) |i| {
+                    mean_load += index.pages[i].?.load();
+                    min_load = @min(min_load, index.pages[i].?.load());
+                    max_load = @max(max_load, index.pages[i].?.load());
+                }
+                std.debug.print(
+                    "load - min: {d:.2}\tmean: {d:.2}\tmax: {d:.2}\n",
+                    .{ min_load, mean_load / @as(f32, @floatFromInt(index.n_pages)), max_load },
+                );
             }
         };
 
@@ -264,6 +287,14 @@ pub fn Storage(
                 index.debugPrint();
             } else {
                 std.debug.print("  {{}} []\n", .{});
+            }
+        }
+
+        pub fn loadSummary(storage: *Self) void {
+            if (storage.index) |index| {
+                index.loadSummary();
+            } else {
+                std.debug.print("load\n  min:  0\n  mean: 0\n  max:  0\n", .{});
             }
         }
     };

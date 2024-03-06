@@ -87,6 +87,10 @@ fn bench5(alloc: std.mem.Allocator) !void {
             "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
             .{ s0.len, s1.len, s2.len, t_ins, t_it0, t_it1, t_it2, 100 * get_leaf / get_total },
         );
+
+        s0.loadSummary();
+        s1.loadSummary();
+        s2.loadSummary();
     }
 
     std.debug.print("\n{}\n\n", .{acc});
