@@ -323,11 +323,13 @@ pub fn Storage(
         }
 
         fn idistr(h: f64) f64 {
-            return @sqrt(h);
+            // return @sqrt(h);
+            return std.math.pow(f64, h, 1.0 / 3.0);
         }
 
         fn distr(h: f64) f64 {
-            return h * h;
+            // return h * h;
+            return h * h * h;
         }
 
         fn bucketMap(scale: f64, h: f64) usize {
@@ -403,6 +405,18 @@ pub fn Storage(
         }
     };
 }
+
+// test "distr" {
+//     const S = Storage(u32, u32, 2048, 16);
+
+//     std.debug.print("\n", .{});
+//     for (0..20) |i| {
+//         var x: f64 = @floatFromInt(i);
+//         x = S.idistr(x);
+
+//         std.debug.print("{} {}\n", .{ S.bucketBegin(x), S.bucketEnd(x) });
+//     }
+// }
 
 test "storage fuzz" {
     var s = try Storage(u32, u32, 2048, 16).init(std.testing.allocator);
