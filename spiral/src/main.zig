@@ -60,8 +60,7 @@ fn BucketImpl(comptime K: type, comptime V: type, comptime SIZE: comptime_int) t
         }
 
         fn get(bucket: *Self, key: K) ?*V {
-            // var loc = std.hash.uint32(key) % SIZE;
-            var loc = key & (SIZE - 1);
+            var loc = std.hash.uint32(key) % SIZE;
 
             var result: ?*V = null;
             for (0..SIZE) |_| {
@@ -196,8 +195,10 @@ pub fn Storage(
         alloc: std.mem.Allocator,
         len: usize,
         index: *Index,
-        n_buckets: usize,
-        log2_n_buckets: f64,
+
+        scale: f64,
+        bucket_begin: usize,
+        bucket_end: usize,
 
         pub fn init(alloc: std.mem.Allocator) !Self {
             // opting to always have the index and 1 bucket
@@ -205,21 +206,28 @@ pub fn Storage(
                 .alloc = alloc,
                 .len = 0,
                 .index = undefined,
-                .n_buckets = 1,
-                .log2_n_buckets = 0, // log2(1) == 0
+                .scale = undefined,
+                .bucket_begin = undefined,
+                .bucket_end = undefined,
             };
+
+            storage.scale = idistr(0);
+            storage.bucket_begin = bucketBegin(storage.scale);
+            storage.bucket_end = bucketEnd(storage.scale);
 
             storage.index = try alloc.create(Index);
             storage.index.buckets = .{null} ** INDEX_SIZE;
             errdefer alloc.destroy(storage.index);
 
-            storage.index.buckets[storage.n_buckets - 1] = try Bucket.create(alloc);
+            for (storage.bucket_begin..storage.bucket_end) |i| {
+                storage.index.buckets[i % INDEX_SIZE] = try Bucket.create(alloc);
+            }
 
             return storage;
         }
 
         pub fn deinit(storage: *Self) void {
-            for (storage.n_buckets - 1..2 * storage.n_buckets - 1) |i| {
+            for (storage.bucket_begin..storage.bucket_end) |i| {
                 storage.index.buckets[i % INDEX_SIZE].?.destroy(storage.alloc);
             }
             storage.alloc.destroy(storage.index);
@@ -228,80 +236,124 @@ pub fn Storage(
 
         pub fn get(storage: *Self, key: K) ?*V {
             if (key == nil) return null;
+
+            const loc = bucketIndex(storage.scale, key);
+            std.debug.assert(loc >= storage.bucket_begin);
+            std.debug.assert(loc < storage.bucket_end);
+            std.debug.assert(storage.index.buckets[loc % INDEX_SIZE] != null);
+            return storage.index.buckets[loc % INDEX_SIZE].?.get(key);
+
+            // _ = storage;
             // var timer = std.time.Timer.start() catch unreachable;
-            @prefetch(&storage.index.buckets[storage.n_buckets - 1], .{});
-            const loc = bucketIndex(storage.log2_n_buckets, key);
-            std.debug.assert(storage.index.buckets[loc] != null);
-            const result = storage.index.buckets[loc].?.get(key);
+            // @prefetch(&storage.index.buckets[storage.n_buckets - 1], .{});
+            // const loc = bucketIndex(storage.s, key);
+            // std.debug.assert(storage.index.buckets[loc] != null);
+            // const result = storage.index.buckets[loc].?.get(key);
             // std.debug.print("{}\n", .{timer.read()});
-            return result;
+            // return result;
+            // return null;
         }
 
         pub fn add(storage: *Self, key: K, val: V) !void {
+
+            // TODO this function breaks everything badly if memory allocation fails
+
             if (key == nil) return;
 
-            const loc = bucketIndex(storage.log2_n_buckets, key);
-            // std.debug.print("{}\n", .{loc});
-            std.debug.assert(storage.index.buckets[loc] != null);
-            try storage.index.buckets[loc].?.add(storage.alloc, key, val);
+            const loc = bucketIndex(storage.scale, key);
+            std.debug.assert(loc >= storage.bucket_begin);
+            std.debug.assert(loc < storage.bucket_end);
+            std.debug.assert(storage.index.buckets[loc % INDEX_SIZE] != null);
+            try storage.index.buckets[loc % INDEX_SIZE].?.add(storage.alloc, key, val);
             storage.len += 1;
 
-            // NOTE bucket indices vs n_buckets
-            // 1 : 0 - - - - - - - - - - -
-            // 2 : - 1 2 - - - - - - - - -
-            // 3 : - - 2 3 4 - - - - - - -
-            // 4 : - - - 3 4 5 6 - - - - -
-            // 5 : - - - - 4 5 6 7 8 - - -
-            // etc.
-            // the first is n_buckets - 1
-            // the last is at 2 * (n_buckets - 1)
-            // and the range is n_buckets - 1 .. 2 * n_buckets - 1
+            size_up: {
+                // increase the size of the storage if needed
+                // do so by increasing scale so that the first bucket is deleted
+                // allocating however many new buckets are needed
+                // and then reinserting the items from the first bucket wherever they go
 
-            if (storage.n_buckets < INDEX_SIZE and storage.load() > LOAD_MAX) {
-                const emptied = storage.index.buckets[storage.n_buckets - 1].?;
-                storage.index.buckets[storage.n_buckets - 1] = null;
-                // in case we fail to allocate the new buckets, don't destroy this one
-                errdefer storage.index.buckets[storage.n_buckets - 1] = emptied;
+                if (storage.load() < LOAD_MAX) break :size_up;
 
-                const ix_new_a = (2 * storage.n_buckets - 1) % INDEX_SIZE;
-                const ix_new_b = (2 * storage.n_buckets) % INDEX_SIZE;
-                storage.index.buckets[ix_new_a] = try Bucket.create(storage.alloc);
-                errdefer storage.index.buckets[ix_new_a].?.destroy(storage.alloc);
-                storage.index.buckets[ix_new_b] = try Bucket.create(storage.alloc);
-
-                storage.n_buckets += 1;
-                storage.log2_n_buckets = std.math.log2(@as(f64, @floatFromInt(storage.n_buckets)));
-
-                var it = emptied.iterator();
-                while (it.next()) |kv| {
-                    const i = bucketIndex(storage.log2_n_buckets, kv.key);
-                    std.debug.assert(i == ix_new_a or i == ix_new_b);
-                    // since we're splitting a bucket, we're almost guaranteed success
-                    // though in theory, if the splitting buckets have enough overflow
-                    // we could fail to allocate chaining buckets.
-                    // however, statistically this should be almost impossible
-                    // but we might want to think carefully about the order of operations
-                    // in a proper implemetation such that nothing breaks on an allocation failure
-                    storage.index.buckets[i].?
-                        .add(storage.alloc, kv.key, kv.val) catch unreachable;
+                // see if it's possible to increase scale
+                var new_scale = storage.scale;
+                var new_begin = storage.bucket_begin;
+                var new_end = storage.bucket_end;
+                while (new_end - new_begin <= storage.bucket_end - storage.bucket_begin) {
+                    // increase enough that we actually get more space
+                    // (might need a few steps for certain distrbution functions)
+                    new_scale = idistr(@ceil(distr(new_scale)) + 1);
+                    new_begin = bucketBegin(new_scale);
+                    new_end = bucketEnd(new_scale);
                 }
-                emptied.destroy(storage.alloc);
+                if (new_end - new_begin > INDEX_SIZE) break :size_up;
+                if (new_end - storage.bucket_begin > INDEX_SIZE) {
+                    // to maximally use the index we should consider the case where
+                    // the new buckets overlap the buckets we're deleting
+                    // but, it's
+                    break :size_up;
+                }
+
+                // do the increase
+                // first initialize the new buckets
+                for (storage.bucket_end..new_end) |i| {
+                    // this assert relates to the above break where new/deleted overlap
+                    std.debug.assert(i % INDEX_SIZE != storage.bucket_begin % INDEX_SIZE);
+                    storage.index.buckets[i % INDEX_SIZE] = try Bucket.create(storage.alloc);
+                }
+
+                // then reallocate the bucket(s) we're eliminating
+                for (storage.bucket_begin..new_begin) |i| {
+                    var it = storage.index.buckets[i % INDEX_SIZE].?.iterator();
+                    while (it.next()) |kv| {
+                        const new_loc = bucketIndex(new_scale, kv.key);
+                        // std.debug.assert(new_loc >= storage.bucket_end - 1);
+                        std.debug.assert(new_loc >= new_begin);
+                        std.debug.assert(new_loc < new_end);
+                        std.debug.assert(storage.index.buckets[new_loc % INDEX_SIZE] != null);
+                        try storage.index.buckets[new_loc % INDEX_SIZE].?
+                            .add(storage.alloc, kv.key, kv.val);
+                    }
+                    storage.index.buckets[i % INDEX_SIZE].?.destroy(storage.alloc);
+                }
+                storage.bucket_begin = new_begin;
+                storage.bucket_end = new_end;
+                storage.scale = new_scale;
             }
         }
 
-        fn bucketIndex(log2_n_buckets: f64, key: K) usize {
-            var h = floatHash(key);
-            // std.debug.print("{} -> ", .{h});
-            h = @ceil(log2_n_buckets - h) + h;
-            // std.debug.print("{} -> ", .{h});
-            h = std.math.pow(f64, 2, h);
-            // std.debug.print("{} -> {}\n", .{ h, @as(usize, @intFromFloat(h)) });
-            return (@as(usize, @intFromFloat(h)) - 1 + INDEX_SIZE) % INDEX_SIZE;
+        fn idistr(h: f64) f64 {
+            return @sqrt(h);
+        }
+
+        fn distr(h: f64) f64 {
+            return h * h;
+        }
+
+        fn bucketMap(scale: f64, h: f64) usize {
+            var t = @ceil(scale - h) + h;
+            t = distr(t);
+            return @as(usize, @intFromFloat(t));
+        }
+
+        fn bucketBegin(scale: f64) usize {
+            const t = distr(scale) + 0.5;
+            return @as(usize, @intFromFloat(t));
+        }
+
+        fn bucketEnd(scale: f64) usize {
+            const t = @ceil(distr(scale + 1));
+            return @as(usize, @intFromFloat(t));
+        }
+
+        fn bucketIndex(scale: f64, key: K) usize {
+            const h = floatHash(key);
+            return bucketMap(scale, h);
         }
 
         fn load(storage: *Self) f64 {
             return @as(f64, @floatFromInt(storage.len)) /
-                @as(f64, @floatFromInt(BUCKET_SIZE * storage.n_buckets));
+                @as(f64, @floatFromInt(BUCKET_SIZE * (storage.bucket_end - storage.bucket_begin)));
         }
 
         const Iterator = struct {
@@ -317,10 +369,10 @@ pub fn Storage(
                         return .{ .key = kv.key, .val = kv.val };
                     }
 
-                    if (it.cursor < it.storage.n_buckets - 1) {
+                    if (it.cursor < it.storage.bucket_end - 1) {
                         it.cursor += 1;
                         it.bucket_it = it.storage.index.buckets[
-                            (it.storage.n_buckets - 1 + it.cursor) % INDEX_SIZE
+                            it.cursor % INDEX_SIZE
                         ].?.iterator();
                         return it.next();
                     }
@@ -335,23 +387,41 @@ pub fn Storage(
         pub fn iterator(storage: *Self) Iterator {
             return .{
                 .storage = storage,
-                .cursor = 0,
-                .bucket_it = storage.index.buckets[storage.n_buckets - 1].?.iterator(),
+                .cursor = storage.bucket_begin,
+                .bucket_it = storage.index.buckets[storage.bucket_begin % INDEX_SIZE].?.iterator(),
             };
         }
 
         pub fn debugPrint(storage: *Self) void {
-            std.debug.print("Storage <{s} {s}>\n", .{ @typeName(K), @typeName(V) });
-            for (storage.n_buckets - 1..2 * storage.n_buckets - 1) |i| {
+            std.debug.print(
+                "Storage <{s} {s}> len: {} load: {}\n",
+                .{ @typeName(K), @typeName(V), storage.len, storage.load() },
+            );
+            for (storage.bucket_begin..storage.bucket_end) |i| {
                 storage.index.buckets[i % INDEX_SIZE].?.debugPrint();
             }
         }
     };
 }
 
-test "bucketIndex" {
-    const S = Storage(u32, u32, 8, 8);
-    try std.testing.expectEqual(0, S.bucketIndex(std.math.log2(1), 25));
+test "storage fuzz" {
+    var s = try Storage(u32, u32, 2048, 16).init(std.testing.allocator);
+    defer s.deinit();
+    var h = std.AutoHashMap(u32, u32).init(std.testing.allocator);
+    defer h.deinit();
+
+    var rng = std.rand.DefaultPrng.init(@intCast(std.time.microTimestamp()));
+    for (0..10000) |_| {
+        const x = rng.random().int(u16); // so we avoid our nil key
+        if (h.contains(x)) {
+            try std.testing.expectEqual(h.getPtr(x).?.*, s.get(x).?.*);
+        } else {
+            try std.testing.expectEqual(null, h.getPtr(x)); // not like i need to test but w/e
+            try std.testing.expectEqual(null, s.get(x));
+            try s.add(x, x);
+            try h.put(x, x);
+        }
+    }
 }
 
 pub fn main() !void {
