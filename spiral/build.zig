@@ -38,6 +38,23 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("benchmark", "Run the benchmark");
     bench_step.dependOn(&bench_cmd.step);
 
+    const verify = b.addExecutable(.{
+        .name = "verify",
+        .root_source_file = .{ .path = "src/verify.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+
+    b.installArtifact(verify);
+    const verify_cmd = b.addRunArtifact(verify);
+    verify_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+
+    const verify_step = b.step("verify", "Run the verification that no fp issues exist");
+    verify_step.dependOn(&verify_cmd.step);
+
     const unit_tests = b.addTest(.{
         .root_source_file = .{ .path = "src/main.zig" },
         .target = target,
