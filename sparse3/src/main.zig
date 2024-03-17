@@ -20,6 +20,24 @@ pub fn isnil(e: Entity) bool {
     return d.version == std.math.maxInt(u16);
 }
 
+pub const Signal = enum {
+    add,
+    del,
+};
+
+pub const EntityIterator = struct {
+    ctx: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        next: *const fn (cts: *anyopaque) ?Entity,
+    };
+
+    pub fn next(ei: EntityIterator) ?Entity {
+        return ei.vtable.next(ei.ctx);
+    }
+};
+
 pub const Storage = struct {
     const Self = @This();
 
@@ -108,14 +126,26 @@ pub const Storage = struct {
         storage: *Storage,
         cursor: usize,
 
-        pub fn next(it: *Iterator) ?Entity {
+        pub fn next(ctx: *anyopaque) ?Entity {
+            const it: *Iterator = @alignCast(@ptrCast(ctx));
             if (it.cursor == 0) return null;
             it.cursor -= 1;
             return it.storage.dense[it.cursor];
         }
+
+        const vtable = EntityIterator.VTable{
+            .next = &next,
+        };
+
+        pub fn iter(it: *Iterator) EntityIterator {
+            return .{
+                .ctx = @ptrCast(it),
+                .vtable = &vtable,
+            };
+        }
     };
 
-    pub fn iter(storage: *Self) Iterator {
+    pub fn iterator(storage: *Self) Iterator {
         return .{
             .storage = storage,
             .cursor = storage.len,
@@ -140,6 +170,7 @@ pub fn Table(comptime Vs: type) type {
         }
 
         alloc: std.mem.Allocator,
+        arena: std.heap.ArenaAllocator, // queries need tempoary memory
         entities: Storage,
         free: Storage,
         components: std.EnumArray(Component, Storage),
@@ -148,6 +179,8 @@ pub fn Table(comptime Vs: type) type {
             const table = try alloc.create(Self);
             errdefer alloc.destroy(table);
             table.alloc = alloc;
+            table.arena = std.heap.ArenaAllocator.init(alloc);
+            errdefer table.arena.deinit();
 
             table.entities = try Storage.init(void, alloc);
             errdefer table.entities.deinit(void);
@@ -175,6 +208,7 @@ pub fn Table(comptime Vs: type) type {
             }
             table.free.deinit(void);
             table.entities.deinit(void);
+            table.arena.deinit();
             table.alloc.destroy(table);
         }
 
@@ -213,10 +247,12 @@ pub fn Table(comptime Vs: type) type {
         }
 
         pub fn add(table: *Self, comptime c: Component, e: Entity, val: ComponentType(c)) void {
+            if (table.has(c, e)) return;
             return table.components.getPtr(c).add(ComponentType(c), e, val) catch @panic("oom");
         }
 
         pub fn del(table: *Self, comptime c: Component, e: Entity) void {
+            if (!table.has(c, e)) return;
             return table.components.getPtr(c).del(ComponentType(c), e);
         }
 
@@ -228,17 +264,18 @@ pub fn Table(comptime Vs: type) type {
             return table.components.getPtr(c).has(e);
         }
 
+        /// careful
         pub fn data(table: *Self, c: Component) *Storage {
             return table.components.getPtr(c);
         }
 
         const Query = struct {
-            // parent, vtable
-            parent: Storage.Iterator, // abstract into an interface...
+            parent: EntityIterator,
 
             fields: [6]?*Storage,
 
-            pub fn next(q: *Query) ?Entity {
+            pub fn next(ctx: *anyopaque) ?Entity {
+                const q: *Query = @alignCast(@ptrCast(ctx));
                 blk: while (true) {
                     const e = q.parent.next() orelse return null;
                     for (q.fields) |s| {
@@ -246,6 +283,17 @@ pub fn Table(comptime Vs: type) type {
                     }
                     return e;
                 }
+            }
+
+            const vtable = EntityIterator.VTable{
+                .next = &next,
+            };
+
+            pub fn iter(q: *Query) EntityIterator {
+                return .{
+                    .ctx = @ptrCast(q),
+                    .vtable = &vtable,
+                };
             }
         };
 
@@ -270,8 +318,11 @@ pub fn Table(comptime Vs: type) type {
                 }
             }
 
+            const parent_iterator = table.arena.allocator()
+                .create(Storage.Iterator) catch @panic("oom");
+            parent_iterator.* = sorted[0].?.iterator();
             var q = Query{
-                .parent = sorted[0].?.iter(),
+                .parent = parent_iterator.iter(),
                 .fields = .{null} ** 6,
             };
             if (include.len > 1) @memcpy(q.fields[0 .. include.len - 1], sorted[1..include.len]);
@@ -304,7 +355,8 @@ pub fn main() !void {
         s.debugPrint();
     }
 
-    var it = s.iter();
+    var _it = s.iterator();
+    const it = _it.iter();
     while (it.next()) |k| {
         std.debug.print("{}\n", .{k});
     }

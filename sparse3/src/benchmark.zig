@@ -50,7 +50,8 @@ fn bench6(alloc: std.mem.Allocator) !void {
         }
         const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n_ins));
 
-        var it = t.entities.iter();
+        var _it = t.entities.iterator();
+        const it = _it.iter();
         var to_del = std.ArrayList(u32).init(arena_alloc);
         while (it.next()) |e| {
             if (rand.float(f32) < 0.5) {
@@ -64,8 +65,9 @@ fn bench6(alloc: std.mem.Allocator) !void {
             @as(f64, @floatFromInt(to_del.items.len));
 
         var q123 = t.query(&.{ .int1, .int2, .int3 });
+        const it123 = q123.iter();
         var n123: usize = 0;
-        while (q123.next()) |k| {
+        while (it123.next()) |k| {
             const v1 = t.get(.int1, k).?;
             const v2 = t.get(.int2, k).?;
             const v3 = t.get(.int3, k).?;
@@ -75,8 +77,9 @@ fn bench6(alloc: std.mem.Allocator) !void {
         const t_it123 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n123));
 
         var q12 = t.query(&.{ .int1, .int2 });
+        const it12 = q12.iter();
         var n12: usize = 0;
-        while (q12.next()) |k| {
+        while (it12.next()) |k| {
             const v1 = t.get(.int1, k).?;
             const v2 = t.get(.int2, k).?;
             v2.* ^= v1.*;
@@ -85,8 +88,9 @@ fn bench6(alloc: std.mem.Allocator) !void {
         const t_it12 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n12));
 
         var q1 = t.query(&.{.int1});
+        const it1 = q1.iter();
         var n1: usize = 0;
-        while (q1.next()) |k| {
+        while (it1.next()) |k| {
             const v1 = t.get(.int1, k).?;
             acc += v1.*;
             n1 += 1;
@@ -156,7 +160,8 @@ fn bench5(alloc: std.mem.Allocator) !void {
 
         // then do some iteration passes over one component while fetching the others
         var nit: usize = 0;
-        var it2 = s2.iter();
+        var _it2 = s2.iterator();
+        const it2 = _it2.iter();
         while (it2.next()) |k| {
             const x = s0.get(u32, k) orelse continue;
             const y = s1.get(u32, k) orelse continue;
@@ -167,7 +172,8 @@ fn bench5(alloc: std.mem.Allocator) !void {
         const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
         nit = 0;
-        var it1 = s1.iter();
+        var _it1 = s1.iterator();
+        const it1 = _it1.iter();
         while (it1.next()) |k| {
             const x = s0.get(u32, k) orelse continue;
             const v = s1.get(u32, k).?.*;
@@ -177,7 +183,8 @@ fn bench5(alloc: std.mem.Allocator) !void {
         const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
         nit = 0;
-        var it0 = s0.iter();
+        var _it0 = s0.iterator();
+        const it0 = _it0.iter();
         while (it0.next()) |k| {
             const v = s0.get(u32, k).?.*;
             acc += v;
