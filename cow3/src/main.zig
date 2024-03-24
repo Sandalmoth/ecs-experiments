@@ -9,7 +9,8 @@ const Meta = packed struct {
     _pad: u7 = undefined, // TODO try a fingerprint like in std.HashMap
 };
 
-const PAGE_SIZE = 4 * 1024;
+// const PAGE_SIZE = 4 * 1024;
+const PAGE_SIZE = 256;
 const Page = struct {
     bytes: [PAGE_SIZE]u8 align(64),
 };
@@ -61,6 +62,7 @@ const Bucket = struct {
 
     fn createRun(comptime Layout: type, alloc: std.mem.Allocator) !*Bucket {
         const bucket: *Bucket = @ptrCast(@alignCast(try alloc.create(Page)));
+        // std.debug.print("createRun {x}\n", .{@intFromPtr(bucket)});
 
         const data = @intFromPtr(bucket) + @offsetOf(Bucket, "data");
         bucket.head.keys = @ptrFromInt(data + @offsetOf(Layout, "keys"));
@@ -81,6 +83,7 @@ const Bucket = struct {
         run: *Bucket,
     ) !*Bucket {
         const bucket: *Bucket = @ptrCast(@alignCast(try alloc.create(Page)));
+        // std.debug.print("createRun {x}\n", .{@intFromPtr(bucket)});
 
         const data = @intFromPtr(bucket) + @offsetOf(Bucket, "data");
         bucket.head.keys = @ptrFromInt(data + @offsetOf(Layout, "keys"));
@@ -102,9 +105,12 @@ const Bucket = struct {
     fn destroy(bucket: *Bucket, alloc: std.mem.Allocator) void {
         bucket.head.rc -= 1;
         if (bucket.head.rc == 0) {
-            if (bucket.head.run) |run| run.destroy(alloc);
+            if (bucket.head.run) |run| {
+                run.destroy(alloc);
+            }
             const p: *Page = @alignCast(@ptrCast(bucket));
             alloc.destroy(p);
+            // std.debug.print("destroy {x}\n", .{@intFromPtr(bucket)});
         }
     }
 
@@ -121,28 +127,36 @@ const Bucket = struct {
         // since the entropy of those bits has already been spent
         var loc: usize = mod(h >> @intCast(bucket.head.depth));
 
-        while (bucket.head.keys[loc] != nil and
-            bucket.head.keys[loc] != key) : (loc = mod(loc + 1))
-        {}
+        // TODO assert that key is not in bucket (or run)
+
+        while (true) : (loc = mod(loc + 1)) {
+            if (bucket.head.keys[loc] == nil) break;
+            if (bucket.head.keys[loc] == key) {
+                std.debug.assert(bucket.head.meta[loc].tombstone);
+                break;
+            }
+        }
 
         const vals: [*]V = @alignCast(@ptrCast(bucket.head.vals));
         bucket.head.keys[loc] = key;
         vals[loc] = val;
         bucket.head.meta[loc].tombstone = false;
+        bucket.head.len += 1;
     }
 
     pub fn debugPrint(bucket: *Bucket, cap: usize) void {
         if (bucket.head.run == null) {
             std.debug.print(" [ ", .{});
             for (bucket.head.keys[0..bucket.head.len]) |k| std.debug.print("{} ", .{k});
-            std.debug.print("]\n", .{});
+            std.debug.print("] rc:{}\n", .{bucket.head.rc});
         } else {
+            // for (0..bucket.head.depth) |_| std.debug.print("  ", .{});
             std.debug.print(" {} [ ", .{bucket.head.depth});
             for (bucket.head.keys[0..cap]) |k| {
                 if (k == nil) continue;
                 std.debug.print("{} ", .{k});
             }
-            std.debug.print("] ->", .{});
+            std.debug.print("] rc:{} ->", .{bucket.head.rc});
             bucket.head.run.?.debugPrint(cap);
         }
     }
@@ -207,7 +221,10 @@ const Storage = struct {
         };
 
         const h = hash(key);
-        const loc = if (storage.depth == 0) 0 else h & (@as(usize, 1) << @intCast(storage.depth));
+        const loc = if (storage.depth == 0)
+            0
+        else
+            h & (@as(usize, 1) << @intCast(storage.depth - 1));
 
         if (index.buckets[loc].?.head.run == null) {
             // bucket is immutable run, create hashmap overlay
@@ -223,9 +240,79 @@ const Storage = struct {
         }
 
         // TODO test if bucket is full and split if needed
-        // if () {
-        // return storage.add(V, key, val);
-        // }
+        if (index.buckets[loc].?.head.len > storage.capacity * 3 / 4) {
+            // std.debug.print("EXPAND\n", .{});
+
+            // try to create these first, as in case it fails we haven't changed anything
+            const new_bucket_a = try Bucket.createMap(
+                Data.Layout(Data.capacity(V), V),
+                storage.alloc,
+                index.buckets[loc].?.head.depth + 1,
+                index.buckets[loc].?.head.run.?,
+            );
+            index.buckets[loc].?.head.run.?.head.rc += 1;
+            errdefer new_bucket_a.destroy(storage.alloc);
+            const new_bucket_b = try Bucket.createMap(
+                Data.Layout(Data.capacity(V), V),
+                storage.alloc,
+                index.buckets[loc].?.head.depth + 1,
+                index.buckets[loc].?.head.run.?,
+            );
+            index.buckets[loc].?.head.run.?.head.rc += 1;
+            errdefer new_bucket_b.destroy(storage.alloc);
+
+            // storage.debugPrint();
+
+            // expand the index if needed (fail if index is full)
+            if (index.buckets[loc].?.head.depth == storage.depth) {
+                const dir_len: usize = @as(usize, 1) << @intCast(storage.depth);
+                if (dir_len == index.buckets.len) {
+                    return error.IndexFull;
+                }
+
+                for (0..dir_len) |i| {
+                    index.buckets[i].?.head.rc += 1;
+                }
+                @memcpy(index.buckets[dir_len .. 2 * dir_len], index.buckets[0..dir_len]);
+                storage.depth += 1;
+            }
+
+            // storage.debugPrint();
+
+            // now split the overflowing bucket
+            const overflowing = index.buckets[loc].?;
+            overflowing.head.rc += 1;
+            const dir_len: usize = @as(usize, 1) << @intCast(storage.depth);
+            index.buckets[loc].?.head.rc -= 1;
+            index.buckets[loc] = new_bucket_a;
+            index.buckets[loc + dir_len / 2].?.head.rc -= 1;
+            index.buckets[loc + dir_len / 2] = new_bucket_b;
+            errdefer {
+                overflowing.head.rc += 1; // -1 from overflowing ref, +2 from bucket refs
+                index.buckets[loc] = overflowing;
+                index.buckets[loc + dir_len] = overflowing;
+            }
+
+            const keys = overflowing.head.keys[0..storage.capacity];
+            const _vals: [*]V = @alignCast(@ptrCast(overflowing.head.vals));
+            const vals = _vals[0..storage.capacity];
+            const meta = overflowing.head.meta[0..storage.capacity];
+            for (keys, vals, meta) |k, v, m| {
+                if (k == nil) continue;
+                if (m.tombstone) {
+                    // TODO transfer deletions
+                } else {
+                    try storage.add(V, k, v);
+                    // storage.debugPrint();
+                }
+            }
+
+            overflowing.destroy(storage.alloc);
+
+            // storage.debugPrint();
+
+            return storage.add(V, key, val);
+        }
 
         index.buckets[loc].?.add(V, storage.mod, h, key, val);
     }
@@ -236,8 +323,8 @@ const Storage = struct {
 
     fn debugPrint(storage: *Storage) void {
         std.debug.print(
-            "Storage len: {} depth: {}\n",
-            .{ storage.len, storage.depth },
+            "Storage cap: {} len: {} depth: {}\n",
+            .{ storage.capacity, storage.len, storage.depth },
         );
         if (storage.index) |index| {
             for (0..@as(usize, 1) << @intCast(storage.depth)) |i| {
@@ -255,6 +342,9 @@ pub fn main() !void {
     var s = Storage.init(alloc);
     defer s.deinit();
 
-    try s.add(u32, 1, 1);
-    s.debugPrint();
+    for (1..20) |i| {
+        std.debug.print("inserting {}\n", .{i});
+        try s.add(u32, i, @intCast(i));
+        s.debugPrint();
+    }
 }
