@@ -122,6 +122,7 @@ const Bucket = struct {
         key: Entity,
         val: V,
     ) void {
+        std.debug.assert(bucket.head.run != null);
 
         // for the location in the hashmap we're scrapping the bits used to select the bucket
         // since the entropy of those bits has already been spent
@@ -142,6 +143,13 @@ const Bucket = struct {
         vals[loc] = val;
         bucket.head.meta[loc].tombstone = false;
         bucket.head.len += 1;
+    }
+
+    fn compact(bucket: *Bucket, comptime V: type, cap: usize) !*Bucket {
+        // so here's the complication:
+        // what if compaction causes overflow?
+        // it's not impossible to work around
+        // however, an "overflow-proof" design like linear hashing is much simpler
     }
 
     pub fn debugPrint(bucket: *Bucket, cap: usize) void {
@@ -175,6 +183,7 @@ const Storage = struct {
     index: ?*Index,
     len: usize,
     depth: usize,
+    immutable: bool,
 
     capacity: usize, // capacity of buckets
     mod: *const fn (usize) usize, // x -> x % capacity
@@ -185,6 +194,7 @@ const Storage = struct {
             .index = null,
             .len = 0,
             .depth = 0,
+            .immutable = false,
             .capacity = undefined,
             .mod = undefined,
         };
@@ -202,6 +212,7 @@ const Storage = struct {
 
     pub fn add(storage: *Storage, comptime V: type, key: Entity, val: V) !void {
         std.debug.assert(key != nil);
+        std.debug.assert(!storage.immutable);
 
         const index = storage.index orelse {
             storage.index = @ptrCast(@alignCast(try storage.alloc.create(Page)));
@@ -239,10 +250,8 @@ const Storage = struct {
             index.buckets[loc] = bucket;
         }
 
-        // TODO test if bucket is full and split if needed
+        // test if bucket is full and split if needed
         if (index.buckets[loc].?.head.len > storage.capacity * 3 / 4) {
-            // std.debug.print("EXPAND\n", .{});
-
             // try to create these first, as in case it fails we haven't changed anything
             const new_bucket_a = try Bucket.createMap(
                 Data.Layout(Data.capacity(V), V),
@@ -261,8 +270,6 @@ const Storage = struct {
             index.buckets[loc].?.head.run.?.head.rc += 1;
             errdefer new_bucket_b.destroy(storage.alloc);
 
-            // storage.debugPrint();
-
             // expand the index if needed (fail if index is full)
             if (index.buckets[loc].?.head.depth == storage.depth) {
                 const dir_len: usize = @as(usize, 1) << @intCast(storage.depth);
@@ -276,8 +283,6 @@ const Storage = struct {
                 @memcpy(index.buckets[dir_len .. 2 * dir_len], index.buckets[0..dir_len]);
                 storage.depth += 1;
             }
-
-            // storage.debugPrint();
 
             // now split the overflowing bucket
             const overflowing = index.buckets[loc].?;
@@ -303,18 +308,24 @@ const Storage = struct {
                     // TODO transfer deletions
                 } else {
                     try storage.add(V, k, v);
-                    // storage.debugPrint();
                 }
             }
 
             overflowing.destroy(storage.alloc);
 
-            // storage.debugPrint();
-
             return storage.add(V, key, val);
         }
 
         index.buckets[loc].?.add(V, storage.mod, h, key, val);
+    }
+
+    fn lock(storage: *Storage) !void {
+        // rewrite all hash buckets as runs
+        storage.immutable = true;
+    }
+
+    fn step(storage: *Storage) !*Storage {
+        std.debug.assert(storage.immutable);
     }
 
     fn hash(key: Entity) u32 {
