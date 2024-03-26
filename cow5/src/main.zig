@@ -94,12 +94,17 @@ const Map = struct {
         map.head.vals = @ptrFromInt(data + @offsetOf(Layout, "vals"));
         map.head.meta = @ptrFromInt(data + @offsetOf(Layout, "meta"));
         map.head.len = 0;
-        map.head.capacity = 0;
+        map.head.capacity = capacity;
         map.head.mod = struct {
             fn mod(x: usize) usize {
                 return x % capacity;
             }
         }.mod;
+
+        for (0..capacity) |i| {
+            map.head.keys[i] = nil;
+            map.head.meta[i] = .{ .tombstone = false };
+        }
 
         return map;
     }
@@ -109,10 +114,33 @@ const Map = struct {
         alloc.destroy(p);
     }
 
+    fn add(map: *Map, comptime V: type, key: Entity, val: V) !void {
+        var loc = map.head.mod(hash(key));
+
+        while (true) : (loc = map.head.mod(loc + 1)) {
+            if (map.head.keys[loc] == nil) break;
+            if (map.head.keys[loc] == key) {
+                std.debug.assert(map.head.meta[loc].tombstone);
+                break;
+            }
+        }
+
+        const vals: [*]V = @alignCast(@ptrCast(map.head.vals));
+        map.head.keys[loc] = key;
+        vals[loc] = val;
+        map.head.meta[loc].tombstone = false;
+        map.head.len += 1;
+    }
+
+    fn hash(key: Entity) u32 {
+        return std.hash.XxHash32.hash(2654435761, std.mem.asBytes(&key));
+    }
+
     fn debugPrint(map: *Map) void {
-        _ = map;
         std.debug.print("  [ ", .{});
-        // for (0..run.head.len) |i| std.debug.print("{} ", .{run.head.keys[i]});
+        for (0..map.head.capacity) |i| {
+            if (map.head.keys[i] != nil) std.debug.print("{} ", .{map.head.keys[i]});
+        }
         std.debug.print("] : ", .{});
     }
 };
@@ -144,6 +172,15 @@ const Run = struct {
             const p: *Page = @alignCast(@ptrCast(run));
             alloc.destroy(p);
         }
+    }
+
+    fn add(run: *Run, comptime V: type, alloc: std.mem.Allocator, key: Entity, val: V) !void {
+        const map = run.head.map orelse {
+            run.head.map = @ptrCast(@alignCast(try Map.create(V, alloc)));
+            return run.add(V, alloc, key, val);
+        };
+
+        try map.add(V, key, val);
     }
 
     fn debugPrint(run: *Run) void {
@@ -211,7 +248,10 @@ const Storage = struct {
             return storage.add(V, key, val);
         };
 
-        _ = index;
+        // TODO something better than linear?
+        var i: usize = 0;
+        while (key < index.bounds[i]) : (i += 1) {}
+        try index.buckets[i].?.add(V, storage.alloc, key, val);
     }
 
     fn debugPrint(storage: *Storage) void {
@@ -222,6 +262,8 @@ const Storage = struct {
             std.debug.print("]\n", .{});
 
             for (0..storage.n_runs) |i| index.buckets[i].?.debugPrint();
+        } else {
+            std.debug.print(" (empty)\n", .{});
         }
     }
 };
@@ -234,10 +276,7 @@ pub fn main() !void {
     var s = Storage.init(alloc);
     defer s.deinit();
 
-    std.debug.print("{}\n", .{@sizeOf(Storage)});
-    std.debug.print("{}\n", .{@sizeOf(Storage.Index)});
-
-    for (1..20) |i| {
+    for (1..10) |i| {
         std.debug.print("inserting {}\n", .{i});
         try s.add(u32, i, @intCast(i));
         s.debugPrint();
