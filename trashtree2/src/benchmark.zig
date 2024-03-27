@@ -13,6 +13,7 @@ fn bench5(alloc: std.mem.Allocator) !void {
     // a more ecs-like test where one component is iterated and compared with lookups in the other
     var acc: u64 = 0;
     var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
+    const rand = rng.random();
 
     std.debug.print("len_1\tlen_2\tlen_3\tins\titr_1\titr_12\titr_123\t%_hget\n", .{});
 
@@ -28,57 +29,99 @@ fn bench5(alloc: std.mem.Allocator) !void {
 
         var timer = try std.time.Timer.start();
 
-        // insert some random values
-        for (0..2 * n) |_| {
-            const k = rng.random().int(u32) % n;
-            if (s0.get(k)) |_| {} else {
-                try s0.add(k, k);
-            }
-        }
-
+        var n_ins: usize = 0;
         for (0..n) |_| {
-            const k = rng.random().int(u32) % n;
-            if (s1.get(k)) |_| {} else {
-                try s1.add(k, k);
-            }
+            const e = rng.random().int(u16);
+            if (s0.get(e) != null or s1.get(e) != null or s2.get(e) != null) continue;
+            if (rand.float(f32) < 0.3) try s2.add(e, e);
+            if (rand.float(f32) < 0.6) try s1.add(e, e);
+            if (rand.float(f32) < 0.9) try s0.add(e, e);
+            n_ins += 1;
         }
+        const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n_ins));
 
-        for (0..n / 2) |_| {
-            const k = rng.random().int(u32) % n;
-            if (s2.get(k)) |_| {} else {
-                try s2.add(k, k);
-            }
-        }
-
-        const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
-
-        // then do some iteration passes over one component while fetching the others
+        var nit: usize = 0;
         var it2 = s2.iterator();
         while (it2.next()) |kv| {
-            const x = s0.get(kv.key);
-            if (x == null) continue;
-            const y = s1.get(kv.key);
-            if (y == null) continue;
-            x.?.* *%= (y.?.* +% kv.val);
+            const x = s0.get(kv.key) orelse continue;
+            const y = s1.get(kv.key) orelse continue;
+            const v = s2.get(kv.key).?.*;
+            x.* *%= (y.* +% v);
+            nit += 1;
         }
+        const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
-        const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s2.len));
-
+        nit = 0;
         var it1 = s1.iterator();
         while (it1.next()) |kv| {
-            const x = s0.get(kv.key);
-            if (x == null) continue;
-            x.?.* +%= kv.val;
+            const x = s0.get(kv.key) orelse continue;
+            const v = s1.get(kv.key).?.*;
+            x.* +%= v;
+            nit += 1;
         }
+        const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
-        const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s1.len));
-
+        nit = 0;
         var it0 = s0.iterator();
         while (it0.next()) |kv| {
-            acc += kv.val;
+            const v = s0.get(kv.key).?.*;
+            acc += v;
+            nit += 1;
         }
+        const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
-        const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0.len));
+        // // insert some random values
+        // for (0..2 * n) |_| {
+        //     const k = rng.random().int(u32) % n;
+        //     if (s0.get(k)) |_| {} else {
+        //         try s0.add(k, k);
+        //     }
+        // }
+
+        // for (0..n) |_| {
+        //     const k = rng.random().int(u32) % n;
+        //     if (s1.get(k)) |_| {} else {
+        //         try s1.add(k, k);
+        //     }
+        // }
+
+        // for (0..n / 2) |_| {
+        //     const k = rng.random().int(u32) % n;
+        //     if (s2.get(k)) |_| {} else {
+        //         try s2.add(k, k);
+        //     }
+        // }
+        // const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
+
+        // then do some iteration passes over one component while fetching the others
+        // var nit: usize = 0;
+        // var it2 = s2.iterator();
+        // while (it2.next()) |kv| {
+        //     const x = s0.get(kv.key);
+        //     if (x == null) continue;
+        //     const y = s1.get(kv.key);
+        //     if (y == null) continue;
+        //     x.?.* *%= (y.?.* +% kv.val);
+        //     nit += 1;
+        // }
+        // const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
+
+        // var nit: usize = 0;
+        // var it1 = s1.iterator();
+        // while (it1.next()) |kv| {
+        //     const x = s0.get(kv.key);
+        //     if (x == null) continue;
+        //     x.?.* +%= kv.val;
+        // }
+
+        // const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s1.len));
+
+        // var it0 = s0.iterator();
+        // while (it0.next()) |kv| {
+        //     acc += kv.val;
+        // }
+
+        // const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0.len));
 
         const get_total: f64 = @floatFromInt(@import("main.zig").get_total);
         const get_leaf: f64 = @floatFromInt(@import("main.zig").get_leaf);

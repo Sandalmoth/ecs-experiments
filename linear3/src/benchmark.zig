@@ -60,9 +60,10 @@ fn bench5b(alloc: std.mem.Allocator) !void {
         var n_del: usize = 0;
         for (entities.items) |e| {
             if (rand.float(f32) < 0.5) {
-                if (s0.has(e)) s0.del(u32, e);
-                if (s1.has(e)) s1.del(u32, e);
-                if (s2.has(e)) s2.del(u32, e);
+                _ = e;
+                // if (s0.has(e)) s0.del(u32, e);
+                // if (s1.has(e)) s1.del(u32, e);
+                // if (s2.has(e)) s2.del(u32, e);
                 n_del += 1;
             }
         }

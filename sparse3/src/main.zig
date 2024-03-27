@@ -273,14 +273,29 @@ pub fn Table(comptime Vs: type) type {
             parent: EntityIterator,
 
             fields: [6]?*Storage,
+            // n_fields: usize,
+
+            // there's an unfortunate aspect in this generalization
+            // basically, it's very nice for ease of use, composability, etc
+            // however, by only providing the entity, we have to look up each component twice
+            // which more than doubles the time required
+
+            // it might be possible to store anonymous pointers to the values in query
+            // but we'd need to add a getanonymous to get them in next
+            // and that's non-trivial since we don't know the type normally
 
             pub fn next(ctx: *anyopaque) ?Entity {
                 const q: *Query = @alignCast(@ptrCast(ctx));
                 blk: while (true) {
                     const e = q.parent.next() orelse return null;
                     for (q.fields) |s| {
-                        if (s != null and !s.?.has(e)) continue :blk;
+                        // if (s != null and !s.?.has(e)) continue :blk;
+                        if (s == null) break; // it's also possible this branch slows us down
+                        if (!s.?.has(e)) continue :blk;
                     }
+                    // for (0..q.n_fields) |i| {
+                    // if (q.fields[i].?.has(e)) continue :blk;
+                    // }
                     return e;
                 }
             }
@@ -318,14 +333,20 @@ pub fn Table(comptime Vs: type) type {
                 }
             }
 
+            // for (sorted[0..include.len]) |s| {
+            // std.debug.print("{}\n", .{s.?.len});
+            // }
+
             const parent_iterator = table.arena.allocator()
                 .create(Storage.Iterator) catch @panic("oom");
             parent_iterator.* = sorted[0].?.iterator();
             var q = Query{
                 .parent = parent_iterator.iter(),
                 .fields = .{null} ** 6,
+                // .n_fields = include.len - 1,
             };
             if (include.len > 1) @memcpy(q.fields[0 .. include.len - 1], sorted[1..include.len]);
+            // std.debug.print("{}\n", .{q});
             return q;
         }
     };

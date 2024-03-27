@@ -13,6 +13,7 @@ fn bench5(alloc: std.mem.Allocator) !void {
     // a more ecs-like test where one component is iterated and compared with lookups in the other
     var acc: u64 = 0;
     var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
+    const rand = rng.random();
 
     std.debug.print("len_1\tlen_2\tlen_3\tins\titer_1\titer_12\titer_123\n", .{});
 
@@ -27,33 +28,69 @@ fn bench5(alloc: std.mem.Allocator) !void {
         var s2 = Storage(u32, leaf_size).init(alloc);
         defer s2.deinit();
 
+        var entities = try std.ArrayList(u32).initCapacity(alloc, n);
+        defer entities.deinit();
+
         var timer = try std.time.Timer.start();
 
-        // insert some random values
-        for (0..2 * n) |_| {
-            const k = rng.random().int(u32) % n;
-            if (s0.get(k)) |_| {} else {
-                try s0.add(k, k);
-            }
-        }
-
+        var n_ins: usize = 0;
         for (0..n) |_| {
-            const k = rng.random().int(u32) % n;
-            if (s1.get(k)) |_| {} else {
-                try s1.add(k, k);
+            const e = rng.random().int(u32);
+            if (e == std.math.maxInt(u32)) continue;
+            if (s0.get(e) != null or s1.get(e) != null or s2.get(e) != null) continue;
+            if (rand.float(f32) < 0.3) {
+                try s2.add(e, e);
+                n_ins += 1;
             }
-        }
-
-        for (0..n / 2) |_| {
-            const k = rng.random().int(u32) % n;
-            if (s2.get(k)) |_| {} else {
-                try s2.add(k, k);
+            if (rand.float(f32) < 0.6) {
+                try s1.add(e, e);
+                n_ins += 1;
             }
+            if (rand.float(f32) < 0.9) {
+                try s0.add(e, e);
+                n_ins += 1;
+            }
+            try entities.append(e);
         }
+        const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n_ins));
 
-        const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
+        // var n_del: usize = 0;
+        // for (entities.items) |e| {
+        //     if (rand.float(f32) < 0.5) {
+        //         if (s0.get(e) != null) s0.del(e);
+        //         if (s1.get(e) != null) s1.del(e);
+        //         if (s2.get(e) != null) s2.del(e);
+        //         n_del += 1;
+        //     }
+        // }
+        // const t_del = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n_del));
+
+        // // insert some random values
+        // for (0..2 * n) |_| {
+        //     const k = rng.random().int(u32) % n;
+        //     if (s0.get(k)) |_| {} else {
+        //         try s0.add(k, k);
+        //     }
+        // }
+
+        // for (0..n) |_| {
+        //     const k = rng.random().int(u32) % n;
+        //     if (s1.get(k)) |_| {} else {
+        //         try s1.add(k, k);
+        //     }
+        // }
+
+        // for (0..n / 2) |_| {
+        //     const k = rng.random().int(u32) % n;
+        //     if (s2.get(k)) |_| {} else {
+        //         try s2.add(k, k);
+        //     }
+        // }
+
+        // const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
 
         // then do some iteration passes over one component while fetching the others
+        var nit: usize = 0;
         var it2 = s2.iterator();
         while (it2.next()) |kv| {
             const x = s0.get(kv.key);
@@ -61,25 +98,27 @@ fn bench5(alloc: std.mem.Allocator) !void {
             const y = s1.get(kv.key);
             if (y == null) continue;
             x.?.* *%= (y.?.* +% kv.val);
+            nit += 1;
         }
+        const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
-        const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s2.len));
-
+        nit += 1;
         var it1 = s1.iterator();
         while (it1.next()) |kv| {
             const x = s0.get(kv.key);
             if (x == null) continue;
             x.?.* +%= kv.val;
+            nit += 1;
         }
+        const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
-        const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s1.len));
-
+        nit += 1;
         var it0 = s0.iterator();
         while (it0.next()) |kv| {
             acc += kv.val;
+            nit += 1;
         }
-
-        const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0.len));
+        const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
         std.debug.print(
             "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",

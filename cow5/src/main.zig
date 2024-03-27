@@ -33,6 +33,7 @@ const RunHeader = struct {
     len: usize,
     capacity: usize,
     map: ?*Map,
+    next: ?*Run, // after compaction, map should be null but we might have several run pages
     rc: usize,
 };
 
@@ -221,6 +222,7 @@ const Run = struct {
         run.head.len = 0;
         run.head.capacity = capacity;
         run.head.map = null;
+        run.head.next = null;
         run.head.rc = 0;
 
         return run;
@@ -230,6 +232,7 @@ const Run = struct {
         run.head.rc -= 1;
         if (run.head.rc == 0) {
             if (run.head.map) |map| map.destroy(alloc);
+            if (run.head.next) |next| next.destroy(alloc);
             const p: *Page = @alignCast(@ptrCast(run));
             alloc.destroy(p);
         }
@@ -242,6 +245,58 @@ const Run = struct {
         };
 
         try map.add(V, key, val);
+    }
+
+    fn compact(run: *Run, comptime V: type, alloc: std.mem.Allocator) !*Run {
+        const map = run.head.map orelse {
+            // no edits to this run, return as is
+            return run;
+        };
+        std.debug.assert(run.head.next == null);
+
+        const len = @as(i32, @intCast(run.head.len)) + map.head.len;
+        if (len <= 0) {
+            @panic("TODO");
+        }
+        const n_pages = @as(usize, @intCast(len)) / run.head.capacity + 1;
+        const new_page_len = @as(usize, @intCast(len)) / n_pages;
+
+        const new_run_head = try Run.create(V, alloc);
+        errdefer new_run_head.destroy(alloc);
+        new_run_head.head.rc = 1;
+        var new_run = new_run_head;
+        for (1..n_pages) |_| {
+            new_run.head.next = try Run.create(V, alloc);
+            new_run = new_run.head.next.?;
+        }
+        new_run = new_run_head;
+
+        var it_map = map.sorted(V);
+        var i: usize = 0;
+        var j: usize = 0;
+        while (it_map.next()) |kv_map| {
+            if (i == new_page_len) {
+                i = 0;
+                new_run = new_run.head.next.?;
+            }
+
+            const vals: [*]V = @alignCast(@ptrCast(run.head.vals));
+            const new_vals: [*]V = @alignCast(@ptrCast(new_run.head.vals));
+            while (j < run.head.len and run.head.keys[j] < kv_map.key) : (j += 1) {
+                new_run.head.keys[i] = run.head.keys[j];
+                new_vals[i] = vals[j];
+                new_run.head.len += 1;
+                i += 1;
+            }
+
+            new_run.head.keys[i] = kv_map.key;
+            new_vals[i] = kv_map.val_ptr.*;
+            new_run.head.len += 1;
+            i += 1;
+        }
+
+        run.destroy(alloc);
+        return new_run_head;
     }
 
     fn debugPrint(run: *Run) void {
@@ -318,42 +373,16 @@ const Storage = struct {
     }
 
     pub fn compact(storage: *Storage, comptime V: type) !void {
-        storage.immutable = true; // TODO move to replicate
+        // storage.immutable = true; // TODO move to replicate
 
         const index = storage.index orelse return;
         std.debug.assert(storage.n_runs > 0);
-        var i = storage.n_runs;
-        while (i > 0) {
-            i -= 1;
-            const run = index.buckets[i].?;
-            const map = run.head.map orelse continue;
 
-            // how many runs will we need for this run + map after compacting?
-            const len = @as(i32, @intCast(run.head.len)) + map.head.len;
-            if (len <= 0) {
-                // I think shuffle everything to the right in the index and destroy this one?
-                @panic("TODO");
-            }
-            const n_pages = @as(usize, @intCast(len)) / run.head.capacity + 1;
-            std.mem.copyBackwards(
-                ?*Run,
-                index.buckets[i + n_pages ..],
-                index.buckets[i .. i + n_pages],
-            );
-            for (0..n_pages) |j| {
-                // handle failure?
-                index.buckets[i + j] = Run.create(V, storage.alloc) catch
-                    @panic("Allocation failure in Storage.compact");
-            }
-
-            // we have our run and map, as well as enough new buckets to store merged result
-            // now, fill all the buckets evenly with values from the run & map
-            var it_map = map.sorted(V);
-            while (it_map.next()) |kv_map| {
-                std.debug.print("{}\n", .{kv_map.key});
-            }
-
-            std.debug.print("{} {} {}\n", .{ i, len, n_pages });
+        for (0..storage.n_runs) |i| {
+            // ugh, what if memory alloc fails, not messing up is so annoying
+            // TODO switch to just panicking if memory should run out probably
+            // it's not like we can or care to fix it anyway
+            index.buckets[i] = try index.buckets[i].?.compact(V, storage.alloc);
         }
     }
 
@@ -380,6 +409,7 @@ pub fn main() !void {
     defer s.deinit();
 
     for (1..10) |i| {
+        if (i % 2 == 0) continue;
         std.debug.print("inserting {}\n", .{i});
         try s.add(u32, i, @intCast(i));
         s.debugPrint();
@@ -388,7 +418,8 @@ pub fn main() !void {
     try s.compact(u32);
     s.debugPrint();
 
-    for (10..20) |i| {
+    for (1..10) |i| {
+        if (i % 2 == 1) continue;
         std.debug.print("inserting {}\n", .{i});
         try s.add(u32, i, @intCast(i));
         s.debugPrint();

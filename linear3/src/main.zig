@@ -24,6 +24,7 @@ fn BucketPrototype(comptime K: type, comptime SIZE: comptime_int) type {
         keys: [SIZE]K,
         vals: usize,
         skip: [SIZE + 1]u16,
+        lens: [SIZE]u8,
         len: usize,
         next: ?*Self,
         size: usize,
@@ -101,6 +102,7 @@ fn BucketImpl(
         keys: [MAX_SIZE]K,
         vals: usize, // [*]V and *Page
         skip: [MAX_SIZE + 1]u16, // indicates jumps while iterating
+        lens: [MAX_SIZE]u8, // probe lengths for robin-hood
         len: usize,
         next: ?*Self, // for chaining to another bucket in case load is exceeded
 
@@ -167,11 +169,37 @@ fn BucketImpl(
 
             var loc = hash(key) & bucket.mask;
 
-            while (bucket.keys[loc] != nil) : (loc = (loc + 1) & bucket.mask) {
-                std.debug.assert(bucket.keys[loc] != key);
+            // while (bucket.keys[loc] != nil) : (loc = (loc + 1) & bucket.mask) {
+            //     std.debug.assert(bucket.keys[loc] != key);
+            // }
+            // bucket.keys[loc] = key;
+            // @as([*]V, @ptrFromInt(bucket.vals))[loc] = val;
+
+            var walk_key = key;
+            var walk_val = val;
+            var walk_dst: u8 = 0;
+            const vals = @as([*]V, @ptrFromInt(bucket.vals));
+            while (walk_dst < bucket.size) {
+                if (bucket.keys[loc] == nil) {
+                    bucket.keys[loc] = walk_key;
+                    vals[loc] = walk_val;
+                    bucket.lens[loc] = walk_dst;
+                    break;
+                } else if (bucket.lens[loc] < walk_dst) {
+                    const tmp_key = bucket.keys[loc];
+                    const tmp_val = vals[loc];
+                    const tmp_dst = bucket.lens[loc];
+                    bucket.keys[loc] = walk_key;
+                    vals[loc] = walk_val;
+                    bucket.lens[loc] = walk_dst;
+                    walk_key = tmp_key;
+                    walk_val = tmp_val;
+                    walk_dst = tmp_dst;
+                }
+                loc = (loc + 1) & bucket.mask;
+                walk_dst += 1;
             }
-            bucket.keys[loc] = key;
-            @as([*]V, @ptrFromInt(bucket.vals))[loc] = val;
+
             bucket.setUnskip(loc);
             bucket.len += 1;
         }
@@ -180,11 +208,10 @@ fn BucketImpl(
             std.debug.assert(key != nil);
 
             var loc = hash(key) & bucket.mask;
-            var result: ?*V = null;
-            for (0..bucket.size) |_| {
+            while (true) {
+                // for (0..bucket.size) |_| {
                 if (bucket.keys[loc] == key) {
-                    result = &@as([*]V, @ptrFromInt(bucket.vals))[loc];
-                    break;
+                    return &@as([*]V, @ptrFromInt(bucket.vals))[loc];
                 } else if (bucket.keys[loc] == nil) {
                     break;
                 }
@@ -192,21 +219,20 @@ fn BucketImpl(
             }
 
             // if we didn't find the key here, check the overflow chain
-            if (result == null and bucket.next != null) {
-                result = bucket.next.?.get(V, key);
+            if (bucket.next != null) {
+                return bucket.next.?.get(V, key);
             }
-            return result;
+            return null;
         }
 
         fn has(bucket: *Self, key: K) bool {
             std.debug.assert(key != nil);
 
             var loc = hash(key) & bucket.mask;
-            var result = false;
-            for (0..bucket.size) |_| {
+            while (true) {
+                // for (0..bucket.size) |_| {
                 if (bucket.keys[loc] == key) {
-                    result = true;
-                    break;
+                    return true;
                 } else if (bucket.keys[loc] == nil) {
                     break;
                 }
@@ -214,10 +240,10 @@ fn BucketImpl(
             }
 
             // if we didn't find the key here, check the overflow chain
-            if (!result and bucket.next != null) {
-                result = bucket.next.?.has(key);
+            if (bucket.next != null) {
+                return bucket.next.?.has(key);
             }
-            return result;
+            return false;
         }
 
         /// key must be present
@@ -332,7 +358,7 @@ fn BucketImpl(
             const l = if (loc > 0) bucket.skip[loc - 1] else 0;
             const r = bucket.skip[loc + 1];
 
-            if (l == 0 and r == 0) {
+            if (l + r == 0) {
                 bucket.skip[loc] = 1;
             } else if (r == 0) {
                 bucket.skip[loc] = 1 + bucket.skip[loc - 1];
@@ -369,7 +395,7 @@ fn BucketImpl(
             const l = if (loc > 0) bucket.skip[loc - 1] else 0;
             const r = bucket.skip[loc + 1];
 
-            if (l == 0 and r == 0) {
+            if (l + r == 0) {
                 std.debug.assert(bucket.skip[loc] == 1);
                 bucket.skip[loc] = 0;
             } else if (r == 0) {

@@ -54,6 +54,7 @@ fn bench5(alloc: std.mem.Allocator) !void {
         const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
 
         // then do some iteration passes over one component while fetching the others
+        var nit: usize = 0;
         var it2 = s2.iterator();
         while (it2.next()) |kv| {
             const x = s0.get(kv.key);
@@ -61,25 +62,27 @@ fn bench5(alloc: std.mem.Allocator) !void {
             const y = s1.get(kv.key);
             if (y == null) continue;
             x.?.* *%= (y.?.* +% kv.val);
+            nit += 1;
         }
+        const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
-        const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s2.len));
-
+        nit = 0;
         var it1 = s1.iterator();
         while (it1.next()) |kv| {
             const x = s0.get(kv.key);
             if (x == null) continue;
             x.?.* +%= kv.val;
+            nit += 1;
         }
+        const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
-        const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s1.len));
-
+        nit = 0;
         var it0 = s0.iterator();
         while (it0.next()) |kv| {
             acc += kv.val;
+            nit += 1;
         }
-
-        const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0.len));
+        const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
         std.debug.print(
             "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",

@@ -119,6 +119,7 @@ fn bench5(alloc: std.mem.Allocator) !void {
     // a more ecs-like test where one component is iterated and compared with lookups in the other
     var acc: u64 = 0;
     var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
+    var rand = rng.random();
 
     std.debug.print("len_1\tlen_2\tlen_3\tins\titer_1\titer_12\titer_123\n", .{});
 
@@ -134,29 +135,37 @@ fn bench5(alloc: std.mem.Allocator) !void {
 
         var timer = try std.time.Timer.start();
 
-        // insert some random values
-        for (0..2 * n) |_| {
-            const k = rng.random().int(u32) % n;
-            if (s0.get(u32, k)) |_| {} else {
-                try s0.add(u32, k, k);
-            }
-        }
-
+        var n_ins: usize = 0;
         for (0..n) |_| {
-            const k = rng.random().int(u32) % n;
-            if (s1.get(u32, k)) |_| {} else {
-                try s1.add(u32, k, k);
-            }
+            const e = rng.random().int(u16);
+            if (s0.has(e) or s1.has(e) or s2.has(e)) continue;
+            if (rand.float(f32) < 0.3) try s2.add(u32, e, e);
+            if (rand.float(f32) < 0.6) try s1.add(u32, e, e);
+            if (rand.float(f32) < 0.9) try s0.add(u32, e, e);
+            n_ins += 1;
         }
+        const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n_ins));
 
-        for (0..n / 2) |_| {
-            const k = rng.random().int(u32) % n;
-            if (s2.get(u32, k)) |_| {} else {
-                try s2.add(u32, k, k);
-            }
-        }
-
-        const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
+        // // insert some random values
+        // for (0..2 * n) |_| {
+        //     const k = rng.random().int(u32) % n;
+        //     if (s0.get(u32, k)) |_| {} else {
+        //         try s0.add(u32, k, k);
+        //     }
+        // }
+        // for (0..n) |_| {
+        //     const k = rng.random().int(u32) % n;
+        //     if (s1.get(u32, k)) |_| {} else {
+        //         try s1.add(u32, k, k);
+        //     }
+        // }
+        // for (0..n / 2) |_| {
+        //     const k = rng.random().int(u32) % n;
+        //     if (s2.get(u32, k)) |_| {} else {
+        //         try s2.add(u32, k, k);
+        //     }
+        // }
+        // const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
 
         // then do some iteration passes over one component while fetching the others
         var nit: usize = 0;
