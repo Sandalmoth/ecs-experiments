@@ -260,6 +260,7 @@ const Run = struct {
         }
         const n_pages = @as(usize, @intCast(len)) / run.head.capacity + 1;
         const new_page_len = @as(usize, @intCast(len)) / n_pages;
+        std.debug.print("{}\n", .{new_page_len});
 
         const new_run_head = try Run.create(V, alloc);
         errdefer new_run_head.destroy(alloc);
@@ -275,11 +276,6 @@ const Run = struct {
         var i: usize = 0;
         var j: usize = 0;
         while (it_map.next()) |kv_map| {
-            if (i == new_page_len) {
-                i = 0;
-                new_run = new_run.head.next.?;
-            }
-
             const vals: [*]V = @alignCast(@ptrCast(run.head.vals));
             const new_vals: [*]V = @alignCast(@ptrCast(new_run.head.vals));
             while (j < run.head.len and run.head.keys[j] < kv_map.key) : (j += 1) {
@@ -287,12 +283,36 @@ const Run = struct {
                 new_vals[i] = vals[j];
                 new_run.head.len += 1;
                 i += 1;
+
+                if (i == new_page_len and new_run.head.next != null) {
+                    i = 0;
+                    new_run = new_run.head.next.?;
+                }
             }
 
             new_run.head.keys[i] = kv_map.key;
             new_vals[i] = kv_map.val_ptr.*;
             new_run.head.len += 1;
             i += 1;
+
+            if (i == new_page_len and new_run.head.next != null) {
+                i = 0;
+                new_run = new_run.head.next.?;
+            }
+        }
+
+        const vals: [*]V = @alignCast(@ptrCast(run.head.vals));
+        const new_vals: [*]V = @alignCast(@ptrCast(new_run.head.vals));
+        while (j < run.head.len) : (j += 1) {
+            new_run.head.keys[i] = run.head.keys[j];
+            new_vals[i] = vals[j];
+            new_run.head.len += 1;
+            i += 1;
+
+            if (i == new_page_len and new_run.head.next != null) {
+                i = 0;
+                new_run = new_run.head.next.?;
+            }
         }
 
         run.destroy(alloc);
@@ -373,7 +393,7 @@ const Storage = struct {
     }
 
     pub fn compact(storage: *Storage, comptime V: type) !void {
-        // storage.immutable = true; // TODO move to replicate
+        if (storage.immutable) return error.Immutable;
 
         const index = storage.index orelse return;
         std.debug.assert(storage.n_runs > 0);
@@ -384,6 +404,27 @@ const Storage = struct {
             // it's not like we can or care to fix it anyway
             index.buckets[i] = try index.buckets[i].?.compact(V, storage.alloc);
         }
+    }
+
+    pub fn cycle(storage: *Storage) !Storage {
+        storage.immutable = true; // TODO move to replicate
+
+        var new = Storage.init(storage.alloc);
+        new.index = @ptrCast(@alignCast(try storage.alloc.create(Page)));
+        new.len = storage.len;
+
+        for (0..storage.n_runs) |i| {
+            var run: ?*Run = storage.index.?.buckets[i].?;
+            while (run != null) {
+                run.?.head.rc += 1;
+                new.index.?.buckets[new.n_runs] = run;
+                new.index.?.bounds[new.n_runs] = run.?.head.keys[0];
+                run = run.?.head.next;
+                new.n_runs += 1;
+            }
+        }
+
+        return new;
     }
 
     fn debugPrint(storage: *Storage) void {
@@ -418,6 +459,13 @@ pub fn main() !void {
     try s.compact(u32);
     s.debugPrint();
 
+    {
+        var s_old = s;
+        s = try s.cycle();
+        s_old.deinit();
+    }
+    s.debugPrint();
+
     for (1..10) |i| {
         if (i % 2 == 1) continue;
         std.debug.print("inserting {}\n", .{i});
@@ -426,5 +474,26 @@ pub fn main() !void {
     }
 
     try s.compact(u32);
+    s.debugPrint();
+    {
+        var s_old = s;
+        s = try s.cycle();
+        s_old.deinit();
+    }
+    s.debugPrint();
+
+    for (11..20) |i| {
+        std.debug.print("inserting {}\n", .{i});
+        try s.add(u32, i, @intCast(i));
+        s.debugPrint();
+    }
+
+    try s.compact(u32);
+    s.debugPrint();
+    {
+        var s_old = s;
+        s = try s.cycle();
+        s_old.deinit();
+    }
     s.debugPrint();
 }
