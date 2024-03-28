@@ -6,87 +6,80 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    _ = alloc;
-
-    // try bench5(alloc);
+    try bench7(alloc);
 }
 
-// fn bench5(alloc: std.mem.Allocator) !void {
-//     // a more ecs-like test where one component is iterated and compared with lookups in the other
-//     var acc: u64 = 0;
-//     var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
+fn bench7(alloc: std.mem.Allocator) !void {
+    var acc: u64 = 0;
+    var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
+    const rand = rng.random();
+    var stdout = std.io.getStdOut().writer();
 
-//     std.debug.print("len_1\tlen_2\tlen_3\tins\titer_1\titer_12\titer_123\n", .{});
+    try stdout.print(
+        "len\tnruns\tadd\tcpct\tcycle\tgetc\tgeth\n",
+        .{},
+    );
+    try stdout.print(
+        "\t\tns\tus\tus\tns\tns\n",
+        .{},
+    );
 
-//     for (6..22) |log_n| {
-//         const n: u32 = @as(u32, 1) << @intCast(log_n);
+    var s = Storage.init(alloc);
+    defer s.deinit();
 
-//         var s0 = Storage(u32, u32).init(alloc);
-//         defer s0.deinit();
-//         var s1 = Storage(u32, u32).init(alloc);
-//         defer s1.deinit();
-//         var s2 = Storage(u32, u32).init(alloc);
-//         defer s2.deinit();
+    var a = try std.ArrayList(u64).initCapacity(alloc, 2 * 2 * 65536);
+    defer a.deinit();
 
-//         var timer = try std.time.Timer.start();
+    const dn = 1024;
+    var timer = try std.time.Timer.start();
 
-//         // insert some random values
-//         for (0..2 * n) |_| {
-//             const k = rng.random().int(u32) % n;
-//             if (s0.get(k)) |_| {} else {
-//                 try s0.add(k, k);
-//             }
-//         }
+    for (0..128) |_| {
+        for (0..dn) |_| {
+            const x = rand.int(u64) | 1; // avoid nil ( = 0 )
+            try s.add(f64, x, @floatFromInt(x));
+            try a.append(x);
+            try a.append(rand.int(u64) | 1);
+        }
 
-//         for (0..n) |_| {
-//             const k = rng.random().int(u32) % n;
-//             if (s1.get(k)) |_| {} else {
-//                 try s1.add(k, k);
-//             }
-//         }
+        const t_add = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(dn));
 
-//         for (0..n / 2) |_| {
-//             const k = rng.random().int(u32) % n;
-//             if (s2.get(k)) |_| {} else {
-//                 try s2.add(k, k);
-//             }
-//         }
+        var nget: usize = 0;
+        for (a.items) |x| {
+            if (rand.float(f32) < 0.5) {
+                if (s.has(x)) {
+                    acc +%= x;
+                }
+                nget += 1;
+            }
+        }
+        const t_geth = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nget));
 
-//         const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
+        try s.compact(f64);
+        const t_compact = 1e-3 * @as(f64, @floatFromInt(timer.lap()));
 
-//         // then do some iteration passes over one component while fetching the others
-//         var it2 = s2.iterator();
-//         while (it2.next()) |kv| {
-//             const x = s0.get(kv.key);
-//             if (x == null) continue;
-//             const y = s1.get(kv.key);
-//             if (y == null) continue;
-//             x.?.* *%= (y.?.* +% kv.val);
-//         }
+        var old_s = s;
+        s = try s.cycle();
+        old_s.deinit();
+        const t_cycle = 1e-3 * @as(f64, @floatFromInt(timer.lap()));
 
-//         const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s2.len));
+        nget = 0;
+        for (a.items) |x| {
+            if (rand.float(f32) < 0.5) {
+                if (s.has(x)) {
+                    acc +%= x;
+                }
+                nget += 1;
+            }
+        }
+        const t_getc = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nget));
 
-//         var it1 = s1.iterator();
-//         while (it1.next()) |kv| {
-//             const x = s0.get(kv.key);
-//             if (x == null) continue;
-//             x.?.* +%= kv.val;
-//         }
+        // s.debugPrint();
 
-//         const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s1.len));
+        try stdout.print(
+            "{}\t{}\t{d:.3}\t{d:.3}\t{d:.3}\t{d:.3}\t{d:.3}\n",
+            .{ s.len, s.n_runs, t_add, t_compact, t_cycle, t_getc, t_geth },
+        );
+    }
 
-//         var it0 = s0.iterator();
-//         while (it0.next()) |kv| {
-//             acc += kv.val;
-//         }
-
-//         const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0.len));
-
-//         std.debug.print(
-//             "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
-//             .{ s0.len, s1.len, s2.len, t_ins, t_it0, t_it1, t_it2 },
-//         );
-//     }
-
-//     std.debug.print("\n{}\n\n", .{acc});
-// }
+    std.debug.print("{}\n", .{acc});
+}

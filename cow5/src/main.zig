@@ -1,6 +1,8 @@
 const std = @import("std");
 const primes = @import("primes.zig").primes;
 
+// extremely proof of concept and unusable
+
 const Entity = u64;
 const nil: Entity = 0;
 
@@ -12,8 +14,8 @@ const Meta = packed struct {
     // or alternatively a displacement distance for robinhood
 };
 
-// const PAGE_SIZE = 4 * 1024;
-const PAGE_SIZE = 256;
+const PAGE_SIZE = 64 * 1024;
+// const PAGE_SIZE = 256;
 const Page = struct {
     bytes: [PAGE_SIZE]u8 align(64),
 };
@@ -66,18 +68,22 @@ const Data = struct {
 
     /// find the biggest prime number size that fits
     fn mapCapacity(comptime V: type) comptime_int {
-        var i: usize = 0;
+        // terrible, should be a binary search or similar
+        @setEvalBranchQuota(10000);
+        var i: usize = PAGE_SIZE / (4 * @max(@sizeOf(Entity), @sizeOf(V)));
         while (@sizeOf(MapLayout(primes[i], V)) < @sizeOf(Data)) : (i += 1) {}
-        if (i == 0) @compileError(@typeName(V) ++ " is too large");
+        while (@sizeOf(MapLayout(primes[i], V)) > @sizeOf(Data)) : (i -= 1) {}
         return primes[i - 1];
     }
 
     /// find the biggest size that fits
     fn runCapacity(comptime V: type) comptime_int {
-        var i: usize = 0;
+        // terrible, should be a binary search or similar
+        @setEvalBranchQuota(10000);
+        var i: usize = PAGE_SIZE / (2 * @max(@sizeOf(Entity), @sizeOf(V)));
         while (@sizeOf(RunLayout(i, V)) < @sizeOf(Data)) : (i += 1) {}
-        if (i == 0) @compileError(@typeName(V) ++ " is too large");
-        return i - 1;
+        while (@sizeOf(RunLayout(i, V)) > @sizeOf(Data)) : (i -= 1) {}
+        return i;
     }
 };
 
@@ -133,6 +139,15 @@ const Map = struct {
         map.head.len += 1;
     }
 
+    fn has(map: *Map, key: Entity) bool {
+        var loc = map.head.mod(hash(key));
+
+        while (true) : (loc = map.head.mod(loc + 1)) {
+            if (map.head.keys[loc] == nil) return false;
+            if (map.head.keys[loc] == key) return true;
+        }
+    }
+
     /// NOTE this destroys the internal structure, map can not be used after this is called
     fn sorted(map: *Map, comptime V: type) SortedIterator(V) {
         const keys = map.head.keys;
@@ -149,21 +164,26 @@ const Map = struct {
         }
 
         // then sort them
-        var unsorted = true;
-        while (unsorted) {
-            unsorted = false;
-            for (1..i) |j| {
-                if (keys[j - 1] > keys[j]) {
-                    const tmpkey = keys[j];
-                    keys[j] = keys[j - 1];
-                    keys[j - 1] = tmpkey;
-                    const tmpval = vals[j];
-                    vals[j] = vals[j - 1];
-                    vals[j - 1] = tmpval;
-                    unsorted = true;
+        for ([_]usize{ 488, 187, 72, 27, 10, 4, 1 }) |gap| {
+            if (gap >= i) continue;
+            for (gap..i) |j| {
+                const tmpk = keys[j];
+                const tmpv = vals[j];
+                var k = j;
+                while (k >= gap and keys[k - gap] > tmpk) : (k -= gap) {
+                    keys[k] = keys[k - gap];
+                    vals[k] = vals[k - gap];
                 }
+                keys[k] = tmpk;
+                vals[k] = tmpv;
             }
         }
+
+        // std.debug.print("{any}\n", .{keys[0..i]});
+        // std.debug.assert(std.sort.isSorted(u64, keys[0..i], {}, std.sort.asc(u64)));
+        // for (1..i) |j| {
+        //     std.debug.assert(keys[j - 1] < keys[j]);
+        // }
 
         return .{
             .keys = keys,
@@ -247,6 +267,25 @@ const Run = struct {
         try map.add(V, key, val);
     }
 
+    fn has(run: *Run, key: Entity) bool {
+        if (run.head.map) |map| {
+            // NOTE incorrect handling of (not implemented) deletions
+            if (map.has(key)) return true;
+        }
+
+        var left: u32 = 0;
+        var right: u32 = @intCast(run.head.len);
+        while (left < right) {
+            const mid = left + (right - left) / 2;
+            if (run.head.keys[mid] >= key) {
+                right = mid;
+            } else {
+                left = mid + 1;
+            }
+        }
+        return run.head.keys[left] == key;
+    }
+
     fn compact(run: *Run, comptime V: type, alloc: std.mem.Allocator) !*Run {
         const map = run.head.map orelse {
             // no edits to this run, return as is
@@ -260,7 +299,6 @@ const Run = struct {
         }
         const n_pages = @as(usize, @intCast(len)) / run.head.capacity + 1;
         const new_page_len = @as(usize, @intCast(len)) / n_pages;
-        std.debug.print("{}\n", .{new_page_len});
 
         const new_run_head = try Run.create(V, alloc);
         errdefer new_run_head.destroy(alloc);
@@ -334,7 +372,7 @@ comptime {
     std.debug.assert(@alignOf(Run) <= @alignOf(Page));
 }
 
-const Storage = struct {
+pub const Storage = struct {
     const Index = struct {
         const index_size = PAGE_SIZE / (2 * @max(@sizeOf(?*Run), @sizeOf(Entity)));
 
@@ -388,8 +426,17 @@ const Storage = struct {
 
         // TODO something better than linear?
         var i: usize = 0;
-        while (key < index.bounds[i]) : (i += 1) {}
+        while (i < storage.n_runs - 1 and key < index.bounds[i]) : (i += 1) {}
         try index.buckets[i].?.add(V, storage.alloc, key, val);
+        storage.len += 1;
+    }
+
+    pub fn has(storage: *Storage, key: Entity) bool {
+        std.debug.assert(key != nil);
+        const index = storage.index orelse return false;
+        var i: usize = 0;
+        while (i < storage.n_runs - 1 and key <= index.bounds[i]) : (i += 1) {}
+        return index.buckets[i].?.has(key);
     }
 
     pub fn compact(storage: *Storage, comptime V: type) !void {
@@ -420,6 +467,7 @@ const Storage = struct {
                 new.index.?.buckets[new.n_runs] = run;
                 new.index.?.bounds[new.n_runs] = run.?.head.keys[0];
                 run = run.?.head.next;
+                new.index.?.buckets[new.n_runs].?.head.next = null;
                 new.n_runs += 1;
             }
         }
@@ -427,7 +475,7 @@ const Storage = struct {
         return new;
     }
 
-    fn debugPrint(storage: *Storage) void {
+    pub fn debugPrint(storage: *Storage) void {
         std.debug.print("Storage", .{});
         if (storage.index) |index| {
             std.debug.print(" [ ", .{});
