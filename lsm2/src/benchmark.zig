@@ -16,16 +16,16 @@ fn bench7(alloc: std.mem.Allocator) !void {
     var stdout = std.io.getStdOut().writer();
 
     try stdout.print(
-        "len\tnruns\tadd\tcpct\tcycle\tgetc\tgeth\n",
+        "len\tadd\tcpct\tgetc\tgeth\n",
         .{},
     );
     try stdout.print(
-        "\t\tns\tus\tus\tns\tns\n",
+        "\tns\tus\tns\tns\n",
         .{},
     );
 
-    var s = Storage.init(alloc);
-    defer s.deinit();
+    var s = Storage.init(f64, alloc);
+    defer s.deinit(f64);
 
     var a = try std.ArrayList(u64).initCapacity(alloc, 2 * 2 * 65536);
     defer a.deinit();
@@ -36,7 +36,7 @@ fn bench7(alloc: std.mem.Allocator) !void {
     for (0..64) |_| {
         for (0..dn) |_| {
             const x = rand.int(u64) | 1; // avoid nil ( = 0 )
-            try s.add(f64, x, @floatFromInt(x));
+            s.add(f64, x, @floatFromInt(x));
             try a.append(x);
             try a.append(rand.int(u64) | 1);
         }
@@ -54,13 +54,8 @@ fn bench7(alloc: std.mem.Allocator) !void {
         }
         const t_geth = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nget));
 
-        try s.compact(f64);
+        s.compact(f64);
         const t_compact = 1e-3 * @as(f64, @floatFromInt(timer.lap()));
-
-        var old_s = s;
-        s = try s.cycle();
-        old_s.deinit();
-        const t_cycle = 1e-3 * @as(f64, @floatFromInt(timer.lap()));
 
         nget = 0;
         for (a.items) |x| {
@@ -73,11 +68,9 @@ fn bench7(alloc: std.mem.Allocator) !void {
         }
         const t_getc = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nget));
 
-        // s.debugPrint();
-
         try stdout.print(
-            "{}\t{}\t{d:.3}\t{d:.3}\t{d:.3}\t{d:.3}\t{d:.3}\n",
-            .{ s.len, s.n_runs, t_add, t_compact, t_cycle, t_getc, t_geth },
+            "{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
+            .{ s.len, t_add, t_compact, t_getc, t_geth },
         );
     }
 
