@@ -54,41 +54,6 @@ fn bench5(alloc: std.mem.Allocator) !void {
         }
         const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n_ins));
 
-        // var n_del: usize = 0;
-        // for (entities.items) |e| {
-        //     if (rand.float(f32) < 0.5) {
-        //         if (s0.get(e) != null) s0.del(e);
-        //         if (s1.get(e) != null) s1.del(e);
-        //         if (s2.get(e) != null) s2.del(e);
-        //         n_del += 1;
-        //     }
-        // }
-        // const t_del = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n_del));
-
-        // // insert some random values
-        // for (0..2 * n) |_| {
-        //     const k = rng.random().int(u32) % n;
-        //     if (s0.get(k)) |_| {} else {
-        //         try s0.add(k, k);
-        //     }
-        // }
-
-        // for (0..n) |_| {
-        //     const k = rng.random().int(u32) % n;
-        //     if (s1.get(k)) |_| {} else {
-        //         try s1.add(k, k);
-        //     }
-        // }
-
-        // for (0..n / 2) |_| {
-        //     const k = rng.random().int(u32) % n;
-        //     if (s2.get(k)) |_| {} else {
-        //         try s2.add(k, k);
-        //     }
-        // }
-
-        // const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
-
         // then do some iteration passes over one component while fetching the others
         var nit: usize = 0;
         var it2 = s2.iterator();
@@ -102,7 +67,7 @@ fn bench5(alloc: std.mem.Allocator) !void {
         }
         const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
-        nit += 1;
+        nit = 0;
         var it1 = s1.iterator();
         while (it1.next()) |kv| {
             const x = s0.get(kv.key);
@@ -112,7 +77,7 @@ fn bench5(alloc: std.mem.Allocator) !void {
         }
         const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
-        nit += 1;
+        nit = 0;
         var it0 = s0.iterator();
         while (it0.next()) |kv| {
             acc += kv.val;
@@ -120,9 +85,53 @@ fn bench5(alloc: std.mem.Allocator) !void {
         }
         const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
+        // sorted merge style
+        nit = 0;
+        it0 = s0.iterator();
+        it1 = s1.iterator();
+        var kv0 = it0.next();
+        var kv1 = it1.next();
+        while (kv0 != null and kv1 != null) {
+            if (kv0.?.key == kv1.?.key) {
+                acc +%= kv0.?.val *% kv1.?.val;
+                kv0 = it0.next();
+                kv1 = it1.next();
+                nit += 1;
+            } else if (kv0.?.key < kv1.?.key) {
+                kv0 = it0.next();
+            } else {
+                kv1 = it1.next();
+            }
+        }
+        const t_it1b = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
+
+        nit = 0;
+        it0 = s0.iterator();
+        it1 = s1.iterator();
+        it2 = s2.iterator();
+        kv0 = it0.next();
+        kv1 = it1.next();
+        var kv2 = it2.next();
+        while (kv0 != null and kv1 != null and kv2 != null) {
+            if (kv0.?.key == kv1.?.key and kv0.?.key == kv2.?.key) {
+                acc +%= kv0.?.val *% kv1.?.val *% kv2.?.val;
+                kv0 = it0.next();
+                kv1 = it1.next();
+                kv2 = it2.next();
+                nit += 1;
+            } else if (kv0.?.key < kv1.?.key or kv0.?.key < kv2.?.key) {
+                kv0 = it0.next();
+            } else if (kv1.?.key < kv0.?.key or kv1.?.key < kv2.?.key) {
+                kv1 = it1.next();
+            } else if (kv2.?.key < kv0.?.key or kv2.?.key < kv1.?.key) {
+                kv2 = it2.next();
+            }
+        }
+        const t_it2b = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
+
         std.debug.print(
-            "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
-            .{ s0.len, s1.len, s2.len, t_ins, t_it0, t_it1, t_it2 },
+            "{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
+            .{ s0.len, s1.len, s2.len, t_ins, t_it0, t_it1, t_it2, t_it1b, t_it2b },
         );
     }
 
