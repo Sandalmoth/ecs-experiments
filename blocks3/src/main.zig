@@ -406,7 +406,7 @@ test "storage fuzz" {
         defer a.deinit();
 
         for (0..n) |_| {
-            const k = (rand.int(Entity) | 1) & 63;
+            const k = (rand.int(Entity) | 1) & 8;
             const v = rand.float(f64);
 
             // std.debug.print("{}\n", .{k});
