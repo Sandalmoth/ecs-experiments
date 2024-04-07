@@ -1,14 +1,14 @@
 const std = @import("std");
 
-// note, though I won't bother with a type-erased and auto-sized page here
-// the idea is to run this on a 65536 byte block allocator
+// the semantics of copy on write provides some really awkward footguns
+// so what if we keep a copy of everything
+// and if it's updated, we then copy again in cycle
+// but otherwise we can just keep the unedited copy
 
 const PAGE_SIZE = 2701; // must be less than 4096 because of index type in State.Detail
 
 pub const Entity = u64;
 pub const nil: Entity = 0;
-
-const Time = u64;
 
 fn Page(comptime V: type) type {
     return struct {
@@ -16,16 +16,15 @@ fn Page(comptime V: type) type {
 
         keys: [PAGE_SIZE]Entity,
         vals: [PAGE_SIZE]V,
-        dels: [PAGE_SIZE]Time,
-        time: Time,
+        modified: bool,
         len: usize,
         rc: usize,
 
-        fn create(alloc: std.mem.Allocator, time: Time) *Self {
+        fn create(alloc: std.mem.Allocator) *Self {
             const page = alloc.create(Self) catch @panic("oom");
+            page.modified = false;
             page.len = 0;
             page.rc = 1;
-            page.time = time;
             return page;
         }
 
@@ -42,18 +41,24 @@ fn Page(comptime V: type) type {
             const ix = page.len;
             page.keys[ix] = key;
             page.vals[ix] = val;
-            page.dels[ix] = std.math.maxInt(Time);
             page.len += 1;
             return ix;
         }
 
-        fn debugPrint(page: *Self, t: Time) void {
-            std.debug.print("  [ ", .{});
+        fn debugPrint(page: *Self) void {
+            if (page.modified) {
+                std.debug.print(" ~[ ", .{});
+            } else {
+                std.debug.print("  [ ", .{});
+            }
             for (0..page.len) |i| {
-                if (t >= page.dels[i]) std.debug.print("~", .{});
                 std.debug.print("{} ", .{page.keys[i]});
             }
-            std.debug.print("]\n", .{});
+            if (page.modified) {
+                std.debug.print("]~\n", .{});
+            } else {
+                std.debug.print("]\n", .{});
+            }
         }
     };
 }
@@ -82,16 +87,20 @@ pub const State = struct {
     buckets: [2048]?*Bucket, // 2048 buckets is overkill but we have the space...
     // extendible or linear hashing (TODO) but for this test, just use one page
     pages: [2048]?*anyopaque, // capped by Detail.page type
-    empty: std.StaticBitSet(2048),
+    n_pages: usize,
     active_page: usize,
-    time: Time,
 
     pub fn create(alloc: std.mem.Allocator) *Self {
         const state = alloc.create(State) catch @panic("oom");
         state.buckets[0] = alloc.create(Bucket) catch @panic("oom");
-        state.empty = std.StaticBitSet(2048).initFull();
+        state.buckets[0].?.sparse = .{@as(u32, @bitCast(Detail{
+            .fingerprint = undefined,
+            .page = undefined,
+            .ix = undefined,
+            .nil = true,
+        }))} ** BUCKET_SIZE;
+        state.n_pages = 0;
         state.alloc = alloc;
-        state.time = 0;
         state.active_page = std.math.maxInt(usize);
         return state;
     }
@@ -101,105 +110,49 @@ pub const State = struct {
         // NOTE with an extendible hashing scheme this needs more care
         new_state.buckets[0] = state.alloc.create(Bucket) catch @panic("oom");
         new_state.buckets[0].?.* = state.buckets[0].?.*;
-        @memcpy(new_state.pages[0..2048], state.pages[0..2048]);
-        var it = state.empty.iterator(.{ .kind = .unset });
-        while (it.next()) |i| {
-            state.page(V, i).rc += 1;
-        }
-        new_state.empty = state.empty;
-        new_state.alloc = state.alloc;
-        new_state.time = state.time + 1;
-        new_state.active_page = std.math.maxInt(usize);
-        new_state.compact(V);
-        return new_state;
-    }
 
-    pub fn compact(state: *State, comptime V: type) void {
-        // bin packing is NP-hard so we're approximating
-        // sort pages in order of occupancy
-        // then pick some pages to merge somehow?
-        // we could also do something like compacting while waiting on something else?
-
-        std.debug.print("start of compact\n", .{});
-        state.debugPrint(f64);
-
-        const n_pages = 2048 - state.empty.count();
-        if (n_pages < 2) return; // allow for at least one past page
-
-        std.debug.print("attempting compact\n", .{});
-
-        // NOTE this could/should go onto a scratch arena
-        var pages = std.ArrayList(*Page(V)).initCapacity(state.alloc, n_pages) catch @panic("oom");
-        defer pages.deinit();
-        var ixs = std.ArrayList(usize).initCapacity(state.alloc, n_pages) catch @panic("oom");
-        defer ixs.deinit();
-
-        var it = state.empty.iterator(.{ .kind = .unset });
-        while (it.next()) |i| {
-            pages.append(state.page(V, i)) catch unreachable;
-            ixs.append(i) catch unreachable;
-        }
-        for ([_]usize{ 488, 187, 72, 27, 10, 4, 1 }) |gap| {
-            if (gap >= pages.items.len) continue;
-            for (gap..pages.items.len) |j| {
-                const tmp = pages.items[j];
-                const tmpix = ixs.items[j];
-                var k = j;
-                while (k >= gap and pages.items[k - gap].len > tmp.len) : (k -= gap) {
-                    pages.items[k] = pages.items[k - gap];
-                    ixs.items[k] = ixs.items[k - gap];
-                }
-                pages.items[k] = tmp;
-                ixs.items[k] = tmpix;
+        for (0..state.n_pages) |i| {
+            if (state.page(V, i).modified) {
+                // copy the page
+                new_state.pages[i] = Page(V).create(state.alloc);
+                new_state.page(V, i).* = state.page(V, i).*;
+                new_state.page(V, i).modified = false;
+            } else {
+                new_state.pages[i] = state.pages[i];
+                new_state.page(V, i).rc += 1;
             }
         }
 
-        // if the page is kinda empty, reinsert those elements so we can drop it
-        var n_removed: usize = 0;
-        for (pages.items) |p| {
-            if (p.len < p.keys.len / 4) {
-                for (0..p.len) |i| {
-                    if (state.time < p.dels[i]) state.set(V, p.keys[i], p.vals[i]);
-                    std.debug.assert(state.time >= p.dels[i]);
-                }
-                n_removed += 1;
-            } else break;
-            p.destroy(state.alloc);
-        }
-
-        for (0..n_removed) |i| {
-            state.empty.set(ixs.items[i]);
-        }
+        new_state.n_pages = state.n_pages;
+        new_state.alloc = state.alloc;
+        new_state.active_page = state.active_page;
+        return new_state;
     }
 
     pub fn destroy(state: *State, comptime V: type) void {
         state.alloc.destroy(state.buckets[0].?);
-        var it = state.empty.iterator(.{ .kind = .unset });
-        while (it.next()) |ix| {
-            state.page(V, ix).destroy(state.alloc);
+        for (0..state.n_pages) |i| {
+            state.page(V, i).destroy(state.alloc);
         }
         state.alloc.destroy(state);
     }
 
     pub fn set(state: *State, comptime V: type, key: Entity, val: V) void {
         if (state.active_page == std.math.maxInt(usize)) state.newPage(V);
-        const active_page = state.page(V, state.active_page);
-        if (active_page.len == active_page.keys.len) state.newPage(V);
+        var active_page = state.page(V, state.active_page);
+        if (active_page.len == active_page.keys.len) {
+            state.newPage(V);
+            active_page = state.page(V, state.active_page);
+        }
 
         const h = hash(key);
-        // TODO how do we get the least correlated bits compared to loc?
-        // if the high-bits are low quality, then this isn't great.
-        // we could do modulo a mersenne prime and mask the 255 low bits?
-        // (needs to be mersenne to get an even distribution of fingerprints)
         const fingerprint: u8 = @intCast(h >> 24);
         var probe: u32 = 0;
         while (true) : (probe += 1) {
             const loc = (h +% probe) % BUCKET_SIZE;
             const d: Detail = @bitCast(state.buckets[0].?.sparse[loc]);
-            std.debug.print("{}\n", .{d});
 
             if (d.nil) {
-                std.debug.print("nil\n", .{});
                 const new_d = Detail{
                     .fingerprint = fingerprint,
                     .page = @intCast(state.active_page),
@@ -207,35 +160,21 @@ pub const State = struct {
                     .nil = false,
                 };
                 state.buckets[0].?.sparse[loc] = @bitCast(new_d);
-                std.debug.print("{}\n", .{new_d});
+                active_page.modified = true;
                 return;
             } else if (fingerprint == d.fingerprint) {
-
-                // lookup the actual key
                 const d_page = state.page(V, d.page);
-                if (d_page.time == state.time) {
-                    std.debug.print("overwrite\n", .{});
-                    d_page.keys[d.ix] = key;
-                    d_page.vals[d.ix] = val;
-                    const new_d = Detail{
-                        .fingerprint = fingerprint,
-                        .page = d.page,
-                        .ix = d.ix,
-                        .nil = false,
-                    };
-                    state.buckets[0].?.sparse[loc] = @bitCast(new_d);
-                    return;
-                }
-                // key exists, but is not recent, so del and insert into active page
-                std.debug.print("deladd\n", .{});
-                d_page.dels[d.ix] = state.time;
+                if (key != d_page.keys[d.ix]) continue;
+                d_page.keys[d.ix] = key;
+                d_page.vals[d.ix] = val;
                 const new_d = Detail{
                     .fingerprint = fingerprint,
-                    .page = @intCast(state.active_page),
-                    .ix = @intCast(active_page.push(key, val)),
+                    .page = d.page,
+                    .ix = d.ix,
                     .nil = false,
                 };
                 state.buckets[0].?.sparse[loc] = @bitCast(new_d);
+                d_page.modified = true;
                 return;
             }
         }
@@ -249,14 +188,16 @@ pub const State = struct {
             const loc = (h +% probe) % BUCKET_SIZE;
             const d: Detail = @bitCast(state.buckets[0].?.sparse[loc]);
             if (d.nil) return false;
-            if (fingerprint == d.fingerprint) {
-                const d_page = state.page(V, d.page);
-                if (key == d_page.keys[d.ix]) return state.time < d_page.dels[d.ix];
+            const d_page = state.page(V, d.page);
+
+            if (fingerprint == d.fingerprint and key == d_page.keys[d.ix]) {
+                return true;
             }
         }
     }
 
-    pub fn get(state: *State, comptime V: type, key: Entity) ?V {
+    /// counts as modifying the data for snapshot data-sharing
+    pub fn get(state: *State, comptime V: type, key: Entity) ?*V {
         const h = hash(key);
         const fingerprint: u8 = @intCast(h >> 24);
         var probe: u32 = 0;
@@ -264,11 +205,11 @@ pub const State = struct {
             const loc = (h +% probe) % BUCKET_SIZE;
             const d: Detail = @bitCast(state.buckets[0].?.sparse[loc]);
             if (d.nil) return null;
-            if (fingerprint == d.fingerprint) {
-                const d_page = state.page(V, d.page);
-                if (key == d_page.keys[d.ix]) {
-                    return if (state.time < d_page.dels[d.ix]) d_page.vals[d.ix] else null;
-                }
+            const d_page = state.page(V, d.page);
+
+            if (fingerprint == d.fingerprint and key == d_page.keys[d.ix]) {
+                d_page.modified = true;
+                return &d_page.vals[d.ix];
             }
         }
     }
@@ -280,65 +221,64 @@ pub const State = struct {
         while (true) : (probe += 1) {
             const loc = (h +% probe) % BUCKET_SIZE;
             const d: Detail = @bitCast(state.buckets[0].?.sparse[loc]);
-            if (d.nil) return;
-            if (fingerprint == d.fingerprint) {
-                const d_page = state.page(V, d.page);
-                if (key == d_page.keys[d.ix]) {
-                    if (d_page.time == state.time) {
-                        state.debugPrint(f64);
+            const d_page = state.page(V, d.page);
 
-                        // we also need to swap delete the backing data
-                        // which is fine because we (this step) own it (this page)
+            if (d.nil) {
+                return;
+            } else if (fingerprint == d.fingerprint and key == d_page.keys[d.ix]) {
+                // swap erase...
 
-                        std.debug.assert(d_page.len > 0);
-                        const last_key = d_page.keys[d_page.len - 1];
-                        const last_val = d_page.vals[d_page.len - 1];
+                // we should probably swap with the actual last entry
+                // or we could run into half-full page issues
+                // but this is simpler and fine for the prototype
 
-                        const last_h = hash(last_key);
-                        const last_fingerprint: u8 = @intCast(last_h >> 24);
-                        var last_probe: u32 = 0;
-                        while (true) : (last_probe += 1) {
-                            const last_loc = (last_h +% last_probe) % BUCKET_SIZE;
-                            const last_d: Detail = @bitCast(state.buckets[0].?.sparse[last_loc]);
-                            if (last_fingerprint == last_d.fingerprint) {
-                                std.debug.assert(last_d.page == d.page);
-                                if (last_key == d_page.keys[d.ix]) {
-                                    // we found our entry, now we can swap-delete
+                // we can't simply use the active page, as then we'd need to deal with the special
+                // case of it becoming empty
 
-                                    d_page.keys[d.ix] = last_key;
-                                    d_page.vals[d.ix] = last_val;
+                std.debug.assert(d_page.len > 0);
+                const last_key = d_page.keys[d_page.len - 1];
+                const last_val = d_page.vals[d_page.len - 1];
+                const last_h = hash(last_key);
+                const last_fingerprint: u8 = @intCast(last_h >> 24);
+                var last_probe: u32 = 0;
+                while (true) : (last_probe += 1) {
+                    const last_loc = (last_h +% last_probe) % BUCKET_SIZE;
+                    const last_d: Detail = @bitCast(state.buckets[0].?.sparse[last_loc]);
+                    if (last_fingerprint == last_d.fingerprint) {
+                        std.debug.assert(last_d.page == d.page);
+                        if (last_key == d_page.keys[last_d.ix]) {
+                            // we found our entry, now we can swap-delete
 
-                                    const new_last_d = Detail{
-                                        .fingerprint = last_fingerprint,
-                                        .page = d.page,
-                                        .ix = d.ix,
-                                        .nil = false,
-                                    };
-                                    state.buckets[0].?.sparse[last_loc] = @bitCast(new_last_d);
-                                    break;
-                                }
-                            }
+                            d_page.keys[d.ix] = last_key;
+                            d_page.vals[d.ix] = last_val;
+
+                            const new_last_d = Detail{
+                                .fingerprint = last_fingerprint,
+                                .page = d.page,
+                                .ix = d.ix,
+                                .nil = false,
+                            };
+                            state.buckets[0].?.sparse[last_loc] = @bitCast(new_last_d);
+
+                            // when deleting the entry in the index, we need to maintain
+                            // the probing invariant
+                            const new_d = Detail{
+                                .fingerprint = undefined,
+                                .page = undefined,
+                                .ix = undefined,
+                                .nil = true,
+                            };
+                            state.buckets[0].?.sparse[loc] = @bitCast(new_d);
+
+                            d_page.len -= 1;
+                            d_page.modified = true;
+                            return;
                         }
-
-                        d_page.len -= 1;
-                        const new_d = Detail{
-                            .fingerprint = undefined,
-                            .page = undefined,
-                            .ix = undefined,
-                            .nil = true,
-                        };
-                        state.buckets[0].?.sparse[loc] = @bitCast(new_d);
-                        return;
-                    } else {
-                        d_page.dels[d.ix] = state.time;
-                        return;
                     }
                 }
             }
         }
     }
-
-    // NOTE if implemented, getPtr must ensure that the item is in a page beloning to this state
 
     pub fn hash(key: Entity) u32 {
         return std.hash.XxHash32.hash(2701, std.mem.asBytes(&key));
@@ -350,16 +290,16 @@ pub const State = struct {
     }
 
     fn newPage(state: *State, comptime V: type) void {
-        state.active_page = state.empty.findFirstSet() orelse @panic("no empty pages");
-        state.empty.unset(state.active_page);
-        state.pages[state.active_page] = Page(V).create(state.alloc, state.time);
+        std.debug.assert(state.n_pages < 2048);
+        state.active_page = state.n_pages;
+        state.n_pages += 1;
+        state.pages[state.active_page] = Page(V).create(state.alloc);
     }
 
     fn debugPrint(state: *State, comptime V: type) void {
-        std.debug.print("State {} <{s}>\n", .{ state.time, @typeName(V) });
-        var it = state.empty.iterator(.{ .kind = .unset });
-        while (it.next()) |ix| {
-            state.page(V, ix).debugPrint(state.time);
+        std.debug.print("State <{s}>\n", .{@typeName(V)});
+        for (0..state.n_pages) |i| {
+            state.page(V, i).debugPrint();
         }
     }
 };
@@ -381,6 +321,11 @@ test "scratch" {
     s.set(f64, 3, 3.0);
     s.set(f64, 2, 2.0);
     s.debugPrint(f64);
+
+    std.debug.print("{}\n", .{s.has(f64, 1)});
+    std.debug.print("{}\n", .{s.has(f64, 2)});
+    std.debug.print("{}\n", .{s.has(f64, 3)});
+    std.debug.print("{}\n", .{s.has(f64, 4)});
 
     {
         var sprev = s;
@@ -436,6 +381,32 @@ test "scratch" {
     std.debug.print("{}\n", .{s.has(f64, 3)});
     std.debug.print("{}\n", .{s.has(f64, 4)});
 
+    s.set(f64, 3, 3.0);
+    s.debugPrint(f64);
+
+    s.del(f64, 1);
+    s.del(f64, 2);
+    s.del(f64, 3);
+    s.del(f64, 4);
+    s.debugPrint(f64);
+
+    std.debug.print("{}\n", .{s.has(f64, 1)});
+    std.debug.print("{}\n", .{s.has(f64, 2)});
+    std.debug.print("{}\n", .{s.has(f64, 3)});
+    std.debug.print("{}\n", .{s.has(f64, 4)});
+
+    {
+        var sprev = s;
+        defer sprev.destroy(f64);
+        s = s.step(f64);
+    }
+    s.debugPrint(f64);
+
+    std.debug.print("{}\n", .{s.has(f64, 1)});
+    std.debug.print("{}\n", .{s.has(f64, 2)});
+    std.debug.print("{}\n", .{s.has(f64, 3)});
+    std.debug.print("{}\n", .{s.has(f64, 4)});
+
     // sprev.debugPrint(f64);
 }
 
@@ -457,15 +428,15 @@ test "storage fuzz" {
         defer a.deinit();
 
         for (0..n) |_| {
-            const k = (rand.int(Entity) | 1) & 7;
+            const k = (rand.int(Entity) | 1) & 511;
             const v = rand.float(f64);
 
             try std.testing.expect(s.has(f64, k) == h.contains(k));
             if (s.has(f64, k)) continue;
 
-            std.debug.print("{}\n", .{k});
-            s.debugPrint(f64);
-            std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
+            // std.debug.print("{}\n", .{k});
+            // s.debugPrint(f64);
+            // std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
 
             s.set(f64, k, v);
             try h.put(k, v);
@@ -478,11 +449,11 @@ test "storage fuzz" {
         for (a.items) |k| {
             if (rand.boolean()) continue;
 
-            // std.debug.print("{}\n", .{k});
-            // s.debugPrint(f64);
-            // std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
+            std.debug.print("{}\n", .{k});
+            s.debugPrint(f64);
+            std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
 
-            try std.testing.expect(s.get(f64, k).? == h.getPtr(k).?.*);
+            try std.testing.expect(s.get(f64, k).?.* == h.getPtr(k).?.*);
             s.del(f64, k);
             try std.testing.expect(h.remove(k));
 
