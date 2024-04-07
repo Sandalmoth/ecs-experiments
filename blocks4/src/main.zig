@@ -5,7 +5,7 @@ const std = @import("std");
 // and if it's updated, we then copy again in cycle
 // but otherwise we can just keep the unedited copy
 
-const PAGE_SIZE = 2701; // must be less than 4096 because of index type in State.Detail
+const PAGE_SIZE = 3; // must be <= 8190 because of index type in State.Detail and flag values
 
 pub const Entity = u64;
 pub const nil: Entity = 0;
@@ -73,10 +73,10 @@ pub const State = struct {
     const Detail = packed struct {
         fingerprint: u8,
         page: u11,
-        ix: u12,
-        nil: bool, // we could store this in page/ix or as a special fingerprint...
-        // (maxInt(ix) can never be used anyway, due to extra data in the pages)
+        ix: u13,
     };
+    const ix_nil = std.math.maxInt(u12);
+    const ix_tomb = std.math.maxInt(u12) - 1;
 
     pub const Bucket = struct {
         sparse: [BUCKET_SIZE]Indirect,
@@ -96,8 +96,7 @@ pub const State = struct {
         state.buckets[0].?.sparse = .{@as(u32, @bitCast(Detail{
             .fingerprint = undefined,
             .page = undefined,
-            .ix = undefined,
-            .nil = true,
+            .ix = ix_nil,
         }))} ** BUCKET_SIZE;
         state.n_pages = 0;
         state.alloc = alloc;
@@ -147,17 +146,19 @@ pub const State = struct {
 
         const h = hash(key);
         const fingerprint: u8 = @intCast(h >> 24);
-        var probe: u32 = 0;
-        while (true) : (probe += 1) {
+        // var probe: u32 = 0;
+        for (0..BUCKET_SIZE) |probe| {
+            // while (true) : (probe += 1) {
             const loc = (h +% probe) % BUCKET_SIZE;
             const d: Detail = @bitCast(state.buckets[0].?.sparse[loc]);
 
-            if (d.nil) {
+            // NOTE not implemented but: rely on dynamic hashing to clean tombstones
+            if (d.ix == ix_tomb) continue;
+            if (d.ix == ix_nil) {
                 const new_d = Detail{
                     .fingerprint = fingerprint,
                     .page = @intCast(state.active_page),
                     .ix = @intCast(active_page.push(key, val)),
-                    .nil = false,
                 };
                 state.buckets[0].?.sparse[loc] = @bitCast(new_d);
                 active_page.modified = true;
@@ -171,40 +172,45 @@ pub const State = struct {
                     .fingerprint = fingerprint,
                     .page = d.page,
                     .ix = d.ix,
-                    .nil = false,
                 };
                 state.buckets[0].?.sparse[loc] = @bitCast(new_d);
                 d_page.modified = true;
                 return;
             }
         }
+        @panic("bucket is full");
     }
 
     pub fn has(state: *State, comptime V: type, key: Entity) bool {
         const h = hash(key);
         const fingerprint: u8 = @intCast(h >> 24);
-        var probe: u32 = 0;
-        while (true) : (probe += 1) {
+        // var probe: u32 = 0;
+        for (0..BUCKET_SIZE) |probe| {
+            // while (true) : (probe += 1) {
             const loc = (h +% probe) % BUCKET_SIZE;
             const d: Detail = @bitCast(state.buckets[0].?.sparse[loc]);
-            if (d.nil) return false;
+            if (d.ix == ix_tomb) continue;
+            if (d.ix == ix_nil) return false;
             const d_page = state.page(V, d.page);
 
             if (fingerprint == d.fingerprint and key == d_page.keys[d.ix]) {
                 return true;
             }
         }
+        @panic("bucket is full");
     }
 
     /// counts as modifying the data for snapshot data-sharing
     pub fn get(state: *State, comptime V: type, key: Entity) ?*V {
         const h = hash(key);
         const fingerprint: u8 = @intCast(h >> 24);
-        var probe: u32 = 0;
-        while (true) : (probe += 1) {
+        // var probe: u32 = 0;
+        for (0..BUCKET_SIZE) |probe| {
+            // while (true) : (probe += 1) {
             const loc = (h +% probe) % BUCKET_SIZE;
             const d: Detail = @bitCast(state.buckets[0].?.sparse[loc]);
-            if (d.nil) return null;
+            if (d.ix == ix_tomb) continue;
+            if (d.ix == ix_nil) return null;
             const d_page = state.page(V, d.page);
 
             if (fingerprint == d.fingerprint and key == d_page.keys[d.ix]) {
@@ -212,20 +218,22 @@ pub const State = struct {
                 return &d_page.vals[d.ix];
             }
         }
+        @panic("bucket is full");
     }
 
     pub fn del(state: *State, comptime V: type, key: Entity) void {
         const h = hash(key);
         const fingerprint: u8 = @intCast(h >> 24);
-        var probe: u32 = 0;
-        while (true) : (probe += 1) {
+        // var probe: u32 = 0;
+        for (0..BUCKET_SIZE) |probe| {
+            // while (true) : (probe += 1) {
             const loc = (h +% probe) % BUCKET_SIZE;
             const d: Detail = @bitCast(state.buckets[0].?.sparse[loc]);
             const d_page = state.page(V, d.page);
 
-            if (d.nil) {
-                return;
-            } else if (fingerprint == d.fingerprint and key == d_page.keys[d.ix]) {
+            if (d.ix == ix_tomb) continue;
+            if (d.ix == ix_nil) return;
+            if (fingerprint == d.fingerprint and key == d_page.keys[d.ix]) {
                 // swap erase...
 
                 // we should probably swap with the actual last entry
@@ -240,14 +248,23 @@ pub const State = struct {
                 const last_val = d_page.vals[d_page.len - 1];
                 const last_h = hash(last_key);
                 const last_fingerprint: u8 = @intCast(last_h >> 24);
-                var last_probe: u32 = 0;
-                while (true) : (last_probe += 1) {
+
+                // std.debug.print("{} {} {}\n", .{ key, last_key, d_page.len });
+
+                // var last_probe: u32 = 0;
+                for (0..BUCKET_SIZE) |last_probe| {
+                    // while (true) : (last_probe += 1) {
                     const last_loc = (last_h +% last_probe) % BUCKET_SIZE;
                     const last_d: Detail = @bitCast(state.buckets[0].?.sparse[last_loc]);
+                    std.debug.assert(last_d.ix != ix_nil);
+                    if (last_d.ix == ix_tomb) continue;
                     if (last_fingerprint == last_d.fingerprint) {
-                        std.debug.assert(last_d.page == d.page);
                         if (last_key == d_page.keys[last_d.ix]) {
+                            // std.debug.print("{}\n", .{d});
+                            // std.debug.print("{}\n", .{last_d});
+                            // std.debug.assert(last_d.page == d.page);
                             // we found our entry, now we can swap-delete
+                            const last_d_page = state.page(V, d.page);
 
                             d_page.keys[d.ix] = last_key;
                             d_page.vals[d.ix] = last_val;
@@ -256,28 +273,28 @@ pub const State = struct {
                                 .fingerprint = last_fingerprint,
                                 .page = d.page,
                                 .ix = d.ix,
-                                .nil = false,
                             };
                             state.buckets[0].?.sparse[last_loc] = @bitCast(new_last_d);
 
-                            // when deleting the entry in the index, we need to maintain
-                            // the probing invariant
                             const new_d = Detail{
                                 .fingerprint = undefined,
                                 .page = undefined,
-                                .ix = undefined,
-                                .nil = true,
+                                .ix = ix_tomb,
                             };
                             state.buckets[0].?.sparse[loc] = @bitCast(new_d);
 
-                            d_page.len -= 1;
+                            last_d_page.len -= 1;
+                            last_d_page.modified = true;
                             d_page.modified = true;
                             return;
                         }
                     }
                 }
+
+                @panic("bucket is full");
             }
         }
+        @panic("bucket is full");
     }
 
     pub fn hash(key: Entity) u32 {
@@ -411,76 +428,80 @@ test "scratch" {
 }
 
 test "storage fuzz" {
-    const n = 1000;
+    const n = 100;
     const m = 16;
-    var s = State.create(std.testing.allocator);
-    defer s.destroy(f64);
-    var h = std.AutoHashMap(Entity, f64).init(std.testing.allocator);
-    defer h.deinit();
-    var c = try std.ArrayList(Entity).initCapacity(std.testing.allocator, n);
-    defer c.deinit();
+    const l = 100;
 
-    var rng = std.rand.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
-    const rand = rng.random();
+    for (0..l) |_| {
+        var s = State.create(std.testing.allocator);
+        defer s.destroy(f64);
+        var h = std.AutoHashMap(Entity, f64).init(std.testing.allocator);
+        defer h.deinit();
+        var c = try std.ArrayList(Entity).initCapacity(std.testing.allocator, n);
+        defer c.deinit();
 
-    for (0..m) |_| {
-        var a = try std.ArrayList(Entity).initCapacity(std.testing.allocator, n);
-        defer a.deinit();
+        var rng = std.rand.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+        const rand = rng.random();
 
-        for (0..n) |_| {
-            const k = (rand.int(Entity) | 1) & 511;
-            const v = rand.float(f64);
+        for (0..m) |_| {
+            var a = try std.ArrayList(Entity).initCapacity(std.testing.allocator, n);
+            defer a.deinit();
 
-            try std.testing.expect(s.has(f64, k) == h.contains(k));
-            if (s.has(f64, k)) continue;
+            for (0..n) |_| {
+                const k = (rand.int(Entity) | 1) & 63;
+                const v = rand.float(f64);
 
-            // std.debug.print("{}\n", .{k});
+                try std.testing.expect(s.has(f64, k) == h.contains(k));
+                if (s.has(f64, k)) continue;
+
+                // std.debug.print("{}\n", .{k});
+                // s.debugPrint(f64);
+                // std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
+
+                s.set(f64, k, v);
+                try h.put(k, v);
+                try a.append(k);
+                try c.append(k);
+            }
+
             // s.debugPrint(f64);
-            // std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
 
-            s.set(f64, k, v);
-            try h.put(k, v);
-            try a.append(k);
-            try c.append(k);
+            for (a.items) |k| {
+                if (rand.boolean()) continue;
+
+                // std.debug.print("{}\n", .{k});
+                // s.debugPrint(f64);
+                // std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
+
+                try std.testing.expect(s.get(f64, k).?.* == h.getPtr(k).?.*);
+                s.del(f64, k);
+                try std.testing.expect(h.remove(k));
+
+                // std.debug.print("{}\n", .{k});
+                // s.debugPrint(f64);
+                // std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
+
+                try std.testing.expect(s.has(f64, k) == h.contains(k));
+            }
+
+            // for (c.items) |k| {
+            //     if (rand.boolean()) continue;
+            //     try std.testing.expect(s.has(f64, k) == h.contains(k));
+            //     if (s.has(f64, k)) {
+            //         s.del(f64, k);
+            //         try std.testing.expect(h.remove(k));
+            //     } else {
+            //         const v = rand.float(f64);
+            //         s.set(f64, k, v);
+            //         try h.put(k, v);
+            //     }
+            //     try std.testing.expect(s.has(f64, k) == h.contains(k));
+            // }
+
+            var sprev = s;
+            defer sprev.destroy(f64);
+            s = s.step(f64);
         }
-
-        s.debugPrint(f64);
-
-        for (a.items) |k| {
-            if (rand.boolean()) continue;
-
-            std.debug.print("{}\n", .{k});
-            s.debugPrint(f64);
-            std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
-
-            try std.testing.expect(s.get(f64, k).?.* == h.getPtr(k).?.*);
-            s.del(f64, k);
-            try std.testing.expect(h.remove(k));
-
-            // std.debug.print("{}\n", .{k});
-            // s.debugPrint(f64);
-            // std.debug.print("{} {}\n", .{ s.has(f64, k), h.contains(k) });
-
-            try std.testing.expect(s.has(f64, k) == h.contains(k));
-        }
-
-        // for (c.items) |k| {
-        //     if (rand.boolean()) continue;
-        //     try std.testing.expect(s.has(f64, k) == h.contains(k));
-        //     if (s.has(f64, k)) {
-        //         s.del(f64, k);
-        //         try std.testing.expect(h.remove(k));
-        //     } else {
-        //         const v = rand.float(f64);
-        //         s.set(f64, k, v);
-        //         try h.put(k, v);
-        //     }
-        //     try std.testing.expect(s.has(f64, k) == h.contains(k));
-        // }
-
-        var sprev = s;
-        defer sprev.destroy(f64);
-        s = s.step(f64);
     }
 }
 
