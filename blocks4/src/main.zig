@@ -5,7 +5,7 @@ const std = @import("std");
 // and if it's updated, we then copy again in cycle
 // but otherwise we can just keep the unedited copy
 
-const PAGE_SIZE = 3; // must be <= 8190 because of index type in State.Detail and flag values
+const PAGE_SIZE = 2701; // must be <= 8190 because of index type in State.Detail and flag values
 
 pub const Entity = u64;
 pub const nil: Entity = 0;
@@ -66,8 +66,9 @@ fn Page(comptime V: type) type {
 pub const State = struct {
     const Self = @This();
 
-    const BUCKET_SIZE = 16369; // prime and uses most of the space
-    // const BUCKET_SIZE = 12289; // prime and far away from power of two (improves hash quality?)
+    // const BUCKET_SIZE = 16369; // prime and uses most of the space
+    // const BUCKET_SIZE = 8192; // prime and uses most of the space
+    const BUCKET_SIZE = 12289; // prime and far away from power of two (improves hash quality?)
 
     const Indirect = u32;
     const Detail = packed struct {
@@ -301,7 +302,7 @@ pub const State = struct {
         return std.hash.XxHash32.hash(2701, std.mem.asBytes(&key));
     }
 
-    fn page(state: *State, comptime V: type, ix: usize) *Page(V) {
+    pub fn page(state: *State, comptime V: type, ix: usize) *Page(V) {
         std.debug.assert(state.pages[ix] != null);
         return @alignCast(@ptrCast(state.pages[ix].?));
     }
@@ -428,9 +429,9 @@ test "scratch" {
 }
 
 test "storage fuzz" {
-    const n = 100;
+    const n = 1000;
     const m = 16;
-    const l = 100;
+    const l = 1000;
 
     for (0..l) |_| {
         var s = State.create(std.testing.allocator);
