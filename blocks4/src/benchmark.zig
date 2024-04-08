@@ -49,7 +49,6 @@ fn bench10(alloc: std.mem.Allocator) !void {
         }
         const t_add = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(dn));
 
-        var nchu: usize = 0;
         {
             var sprev = s0;
             defer sprev.destroy(f64);
@@ -60,6 +59,7 @@ fn bench10(alloc: std.mem.Allocator) !void {
             defer sprev.destroy(f64);
             s1 = s1.step(f64);
         }
+        var nchu: usize = 0;
         for (0..dn) |_| {
             const i = rand.uintLessThan(usize, a.items.len);
             const j = rand.uintLessThan(usize, b.items.len);
@@ -86,6 +86,7 @@ fn bench10(alloc: std.mem.Allocator) !void {
 
         var nit: usize = 0;
         {
+
             // couldn't be bothered to make an iterator, but this is how it would work internally
             for (0..s0.n_pages) |k| {
                 const p = s0.page(f64, k);
@@ -99,18 +100,21 @@ fn bench10(alloc: std.mem.Allocator) !void {
         const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
         nit = 0;
-        {
+        for (0..1000) |_| {
             // couldn't be bothered to make an iterator, but this is how it would work internally
             for (0..s0.n_pages) |k| {
                 const p = s0.page(f64, k);
                 for (0..p.len) |l| {
                     const y: u64 = @intFromFloat((s1.get(f64, p.keys[l]) orelse continue).*);
-                    acc +%= p.keys[l] / y;
+                    acc +%= p.keys[l] ^ y;
+                    // if (!s1.has(f64, p.keys[l])) continue;
+                    // acc +%= p.keys[l];
                     nit += 1;
                 }
                 acc +%= k;
             }
         }
+        std.debug.print("nit {}\n", .{nit});
         const t_it01 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
         try stdout.print(

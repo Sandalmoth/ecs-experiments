@@ -66,9 +66,9 @@ fn Page(comptime V: type) type {
 pub const State = struct {
     const Self = @This();
 
-    // const BUCKET_SIZE = 16369; // prime and uses most of the space
+    const BUCKET_SIZE = 16369; // prime and uses most of the space
     // const BUCKET_SIZE = 8192; // prime and uses most of the space
-    const BUCKET_SIZE = 12289; // prime and far away from power of two (improves hash quality?)
+    // const BUCKET_SIZE = 12289; // prime and far away from power of two (improves hash quality?)
 
     const Indirect = u32;
     const Detail = packed struct {
