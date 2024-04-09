@@ -337,7 +337,7 @@ comptime {
     std.debug.assert(@alignOf(PageIndex) <= BLOCK_ALIGN);
 }
 
-const State = struct {
+pub const State = struct {
     alloc: std.mem.Allocator,
     len: usize,
 
@@ -445,6 +445,31 @@ const State = struct {
         );
         last_page.head.len -= 1;
         state.len -= 1;
+    }
+
+    const Iterator = struct {
+        state: *State,
+        page_cursor: usize,
+        index_cursor: usize,
+
+        pub fn next(it: *Iterator) ?Entity {
+            if (it.page_cursor == 0) return null;
+            if (it.index_cursor == std.math.maxInt(usize)) {
+                it.page_cursor -= 1;
+                it.index_cursor = it.state.page_index.pages[it.page_cursor].?.head.len;
+            }
+            if (it.index_cursor == 0) return null;
+            it.index_cursor -= 1;
+            return it.state.page_index.pages[it.page_cursor].?.head.keys[it.index_cursor];
+        }
+    };
+
+    pub fn iterator(state: *State) Iterator {
+        return .{
+            .state = state,
+            .page_cursor = state.n_pages,
+            .index_cursor = std.math.maxInt(usize),
+        };
     }
 
     fn bucketLoad(state: State) f64 {
