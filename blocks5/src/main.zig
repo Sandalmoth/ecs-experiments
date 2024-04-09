@@ -189,7 +189,7 @@ const Bucket = struct {
                         return;
                     }
                     const k_shift = page_index.pages[l_shift.page].?.head.keys[l_shift.index];
-                    const key_dist = (ix_shift + capacity - (hash(k_shift) % capacity)) % capacity;
+                    const key_dist = (ix_shift -% hash(k_shift)) % capacity;
                     if (key_dist >= dist) {
                         bucket.locs[ix_remove] = bucket.locs[ix_shift];
                         ix_remove = ix_shift;
