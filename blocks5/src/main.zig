@@ -19,7 +19,8 @@ const BucketHeader = struct {
     len: usize,
 };
 const Bucket = struct {
-    const capacity = 997;
+    // const capacity = 997;
+    const capacity = 11;
     const Location = packed struct {
         fingerprint: u8,
         page: u12,
@@ -87,6 +88,25 @@ const Bucket = struct {
         };
     }
 
+    fn has(bucket: *Bucket, page_index: *PageIndex, key: Entity) bool {
+        const h = hash(key);
+        const fingerprint: u8 = @intCast(h >> 24);
+        for (0..capacity) |probe| {
+            const ix = (h + probe) % capacity;
+            const l = bucket.locs[ix];
+            if (l.fingerprint == fingerprint) {
+                const k = page_index.pages[l.page].?.head.keys[l.index];
+                if (k == key) return true;
+            }
+        }
+
+        if (bucket.head.next) |next| {
+            return next.has(page_index, key);
+        } else {
+            return false;
+        }
+    }
+
     fn hash(key: Entity) u32 {
         return std.hash.XxHash32.hash(BUCKET_PRIME, std.mem.asBytes(&key));
     }
@@ -97,7 +117,8 @@ const Bucket = struct {
             if (bucket.locs[i].index != ix_nil) {
                 const l = bucket.locs[i];
                 const k = page_index.pages[l.page].?.head.keys[l.index];
-                std.debug.print("{} ", .{k});
+                // std.debug.print("{} ", .{k});
+                std.debug.print("({},{})->{} ", .{ l.page, l.index, k });
             }
         }
         if (bucket.head.next) |next| {
@@ -134,7 +155,8 @@ const Page = struct {
         page.head = .{
             .keys = undefined,
             ._vals = undefined,
-            .capacity = page.bytes.len / (@sizeOf(Entity) + @sizeOf(V)),
+            // .capacity = page.bytes.len / (@sizeOf(Entity) + @sizeOf(V)),
+            .capacity = 4,
             .len = 0,
             .modified = false,
             .refcount = 1,
@@ -177,12 +199,12 @@ const Page = struct {
         return result;
     }
 
-    fn debugPrint(page: Page) void {
+    fn debugPrint(page: *Page, comptime V: type) void {
         std.debug.print(" [ ", .{});
         for (0..page.head.len) |i| {
-            std.debug.print("{} ", .{page.head.keys[i]});
+            std.debug.print("{}:{} ", .{ page.head.keys[i], page.head.vals(V)[i] });
         }
-        std.debug.print("]\n", .{});
+        std.debug.print("] - {} item(s)\n", .{page.head.len});
     }
 };
 
@@ -239,19 +261,21 @@ const State = struct {
     }
 
     pub fn has(state: State, key: Entity) bool {
-        _ = state;
-        _ = key;
-        return false;
+        if (state.n_buckets == 0) return false;
+        if (key == nil) return false;
+        const bucket_ix = state.bucketIndex(key);
+        return state.bucket_index.buckets[bucket_ix].?.has(state.page_index, key);
     }
 
     pub fn getPtr(state: *State, comptime V: type, key: Entity) ?*V {
+        std.debug.assert(key != nil);
         _ = state;
-        _ = key;
         return null;
     }
 
     /// overwrites if present, inserts if not
     pub fn set(state: *State, comptime V: type, key: Entity, val: V) void {
+        std.debug.assert(key != nil);
         if (state.bucketLoad() > STORAGE_LOAD_MAX) state.bucketExpand();
         if (state.pageFull()) state.pageExpand(V);
 
@@ -263,8 +287,8 @@ const State = struct {
 
     /// noop if not present
     pub fn del(state: *State, comptime V: type, key: Entity) void {
+        std.debug.assert(key != nil);
         _ = state;
-        _ = key;
         _ = V;
     }
 
@@ -294,6 +318,7 @@ const State = struct {
         state.n_buckets += 1;
 
         for (splitting.locs) |loc| {
+            if (loc.index == Bucket.ix_nil) continue;
             const key = state.page_index.pages[loc.page].?.head.keys[loc.index];
             const bucket_ix = state.bucketIndex(key);
             std.debug.assert(bucket_ix == state.bucket_split - 1 or
@@ -329,7 +354,7 @@ const State = struct {
         return std.hash.XxHash32.hash(STORAGE_PRIME, std.mem.asBytes(&key));
     }
 
-    fn bucketIndex(state: *State, key: Entity) usize {
+    fn bucketIndex(state: State, key: Entity) usize {
         const h = hash(key);
         var loc = h & ((@as(usize, 1) << @intCast(state.bucket_round)) - 1);
         if (loc < state.bucket_split) { // i wonder if this branch predicts well
@@ -341,7 +366,8 @@ const State = struct {
     fn pageFull(state: State) bool {
         if (state.n_pages == 0) return true;
         const page = state.page_index.pages[state.n_pages - 1].?;
-        return page.head.len < page.head.capacity;
+        std.debug.assert(page.head.len <= page.head.capacity);
+        return page.head.len == page.head.capacity;
     }
 
     fn pageExpand(state: *State, comptime V: type) void {
@@ -354,28 +380,37 @@ const State = struct {
         state.n_pages += 1;
     }
 
-    fn debugPrint(state: State) void {
+    fn debugPrint(state: State, comptime V: type) void {
         std.debug.print("State\n", .{});
         for (0..state.n_buckets) |i| {
-            std.debug.print(" b", .{});
+            std.debug.print(" bkt", .{});
             state.bucket_index.buckets[i].?.debugPrint(state.page_index);
         }
-        for (0..state.n_buckets) |i| {
-            std.debug.print(" p", .{});
-            state.page_index.pages[i].?.debugPrint();
+        for (0..state.n_pages) |i| {
+            std.debug.print(" {:>3}", .{i});
+            state.page_index.pages[i].?.debugPrint(V);
         }
     }
 };
 
-test "scratc" {
+test "scratch" {
     std.debug.print("\n", .{});
     std.debug.print("{}\n", .{@sizeOf(State)});
 
     var s = State.init(std.testing.allocator);
     defer s.deinit();
 
-    s.set(f64, 1, 1.0);
-    s.debugPrint();
+    for (1..10) |i| {
+        s.set(i64, i, @intCast(i));
+    }
+    s.debugPrint(i64);
+
+    for (1..10) |i| {
+        try std.testing.expect(s.has(i));
+    }
+    for (1..10) |i| {
+        try std.testing.expect(s.has(i));
+    }
 }
 
 pub fn main() void {}
