@@ -31,6 +31,9 @@ const Bucket = struct {
     const load_max = @as(comptime_int, @intFromFloat(
         BUCKET_LOAD_MAX * @as(comptime_float, capacity),
     ));
+    const merge_max = @as(comptime_int, @intFromFloat(
+        BUCKET_MERGE_MAX * @as(comptime_float, capacity),
+    ));
 
     head: BucketHeader,
     locs: [capacity]Location,
@@ -86,6 +89,27 @@ const Bucket = struct {
             .page = page,
             .index = index,
         };
+        page_index.pages[page].?.head.modified = true;
+    }
+
+    fn getLocPtr(bucket: *Bucket, page_index: *PageIndex, key: Entity) ?*Location {
+        const h = hash(key);
+        const fingerprint: u8 = @intCast(h >> 24);
+        for (0..capacity) |probe| {
+            const ix = (h + probe) % capacity;
+            const l = bucket.locs[ix];
+            if (l.index == ix_nil) break;
+            if (l.fingerprint == fingerprint) {
+                const k = page_index.pages[l.page].?.head.keys[l.index];
+                if (k == key) return &bucket.locs[ix];
+            }
+        }
+
+        if (bucket.head.next) |next| {
+            return next.getLocPtr(page_index, key);
+        } else {
+            return null;
+        }
     }
 
     fn has(bucket: *Bucket, page_index: *PageIndex, key: Entity) bool {
@@ -117,7 +141,10 @@ const Bucket = struct {
             if (l.index == ix_nil) break;
             if (l.fingerprint == fingerprint) {
                 const k = page_index.pages[l.page].?.head.keys[l.index];
-                if (k == key) return &page_index.pages[l.page].?.head.vals(V)[l.index];
+                if (k == key) {
+                    page_index.pages[l.page].?.head.modified = true;
+                    return &page_index.pages[l.page].?.head.vals(V)[l.index];
+                }
             }
         }
 
@@ -125,6 +152,63 @@ const Bucket = struct {
             return next.getPtr(V, page_index, key);
         } else {
             return null;
+        }
+    }
+
+    fn del(
+        bucket: *Bucket,
+        alloc: std.mem.Allocator,
+        page_index: *PageIndex,
+        n_pages: usize,
+        key: Entity,
+    ) void {
+        const h = hash(key);
+        const fingerprint: u8 = @intCast(h >> 24);
+        for (0..capacity) |probe| {
+            const ix = (h + probe) % capacity;
+            const l = bucket.locs[ix];
+            if (l.index == ix_nil) break;
+            if (l.fingerprint == fingerprint) {
+                const k = page_index.pages[l.page].?.head.keys[l.index];
+                if (k != key) continue;
+
+                // shuffle entries in bucket to preserve hashmap structure
+                var ix_remove = ix;
+                var ix_shift = ix_remove;
+                var dist: usize = 1;
+                while (true) {
+                    ix_shift = (ix_shift + 1) % capacity;
+                    const l_shift = bucket.locs[ix_shift];
+                    if (l_shift.index == ix_nil) {
+                        bucket.locs[ix_remove] = .{
+                            .fingerprint = undefined,
+                            .page = undefined,
+                            .index = ix_nil,
+                        };
+                        return;
+                    }
+                    const k_shift = page_index.pages[l_shift.page].?.head.keys[l_shift.index];
+                    const key_dist = (ix_shift -% hash(k_shift)) % capacity;
+                    if (key_dist >= dist) {
+                        bucket.locs[ix_remove] = bucket.locs[ix_shift];
+                        ix_remove = ix_shift;
+                        dist = 1;
+                    } else {
+                        dist += 1;
+                    }
+                }
+            }
+        }
+
+        if (bucket.head.next) |next| {
+            next.del(alloc, page_index, n_pages, key);
+            if (next.head.len == 0) {
+                bucket.head.next = next.head.next;
+                next.destroy(alloc);
+            } else if (bucket.head.len + next.head.len < merge_max) {
+                std.debug.print("WANT TO MERGE BUCKET\n", .{});
+                // TODO
+            }
         }
     }
 
@@ -310,8 +394,48 @@ const State = struct {
     /// noop if not present
     pub fn del(state: *State, comptime V: type, key: Entity) void {
         std.debug.assert(key != nil);
-        _ = state;
-        _ = V;
+        if (state.len == 0) return;
+        if (state.bucketLoad() < STORAGE_LOAD_MIN) state.bucketShrink();
+        if (state.pageEmpty()) state.pageShrink();
+
+        const bucket_ix = state.bucketIndex(key);
+        const loc = state.bucket_index.buckets[bucket_ix].?.getLocPtr(state.page_index, key).?;
+
+        // first, replace our entry with the last entry on the last page
+        const last_page = state.page_index.pages[state.n_pages - 1].?;
+        std.debug.assert(last_page.head.len > 0);
+        const last_key = last_page.head.keys[last_page.head.len - 1];
+        const last_val = last_page.head.vals(V)[last_page.head.len - 1];
+
+        const last_bucket_ix = state.bucketIndex(last_key);
+        const last_loc = state.bucket_index.buckets[last_bucket_ix].?
+            .getLocPtr(state.page_index, last_key).?;
+
+        state.page_index.pages[last_loc.page].?.head.keys[last_loc.index] =
+            state.page_index.pages[loc.page].?.head.keys[loc.index];
+        state.page_index.pages[last_loc.page].?.head.vals(V)[last_loc.index] =
+            state.page_index.pages[loc.page].?.head.vals(V)[loc.index];
+        state.page_index.pages[loc.page].?.head.keys[loc.index] = last_key;
+        state.page_index.pages[loc.page].?.head.vals(V)[loc.index] = last_val;
+        const tmp_page = last_loc.page;
+        const tmp_index = last_loc.index;
+        last_loc.page = loc.page;
+        last_loc.index = loc.index;
+        loc.page = tmp_page;
+        loc.index = tmp_index;
+
+        state.page_index.pages[loc.page].?.head.modified = true;
+        state.page_index.pages[last_loc.page].?.head.modified = true;
+
+        // then we can delete in the hashmap
+        state.bucket_index.buckets[bucket_ix].?.del(
+            state.alloc,
+            state.page_index,
+            state.n_pages,
+            key,
+        );
+        last_page.head.len -= 1;
+        state.len -= 1;
     }
 
     fn bucketLoad(state: State) f64 {
@@ -361,6 +485,12 @@ const State = struct {
         }
     }
 
+    fn bucketShrink(state: *State) void {
+        std.debug.print("WANT TO SHRINK BUCKET\n", .{});
+        // TODO
+        _ = state;
+    }
+
     fn bucketSet(state: *State, key: Entity, page: usize, index: usize) void {
         const bucket_ix = state.bucketIndex(key);
         state.bucket_index.buckets[bucket_ix].?.set(
@@ -392,6 +522,12 @@ const State = struct {
         return page.head.len == page.head.capacity;
     }
 
+    fn pageEmpty(state: State) bool {
+        if (state.n_pages == 0) return false;
+        const page = state.page_index.pages[state.n_pages - 1].?;
+        return page.head.len == 0;
+    }
+
     fn pageExpand(state: *State, comptime V: type) void {
         const index = state.page_index;
         if (state.n_pages == index.pages.len) @panic(
@@ -402,8 +538,14 @@ const State = struct {
         state.n_pages += 1;
     }
 
+    fn pageShrink(state: *State) void {
+        std.debug.assert(state.n_pages > 0);
+        state.page_index.pages[state.n_pages - 1].?.destroy(state.alloc);
+        state.n_pages -= 1;
+    }
+
     fn debugPrint(state: State, comptime V: type) void {
-        std.debug.print("State\n", .{});
+        std.debug.print("State - {} item(s)\n", .{state.len});
         for (0..state.n_buckets) |i| {
             std.debug.print(" bkt", .{});
             state.bucket_index.buckets[i].?.debugPrint(state.page_index);
@@ -437,6 +579,15 @@ test "scratch" {
             try std.testing.expect(s.getPtr(i64, i).?.* == v);
         }
     }
+
+    s.del(i64, 2);
+    s.debugPrint(i64);
+    s.del(i64, 4);
+    s.debugPrint(i64);
+    s.del(i64, 6);
+    s.debugPrint(i64);
+    s.del(i64, 8);
+    s.debugPrint(i64);
 }
 
 pub fn main() void {}
