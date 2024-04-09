@@ -94,6 +94,7 @@ const Bucket = struct {
         for (0..capacity) |probe| {
             const ix = (h + probe) % capacity;
             const l = bucket.locs[ix];
+            if (l.index == ix_nil) break;
             if (l.fingerprint == fingerprint) {
                 const k = page_index.pages[l.page].?.head.keys[l.index];
                 if (k == key) return true;
@@ -104,6 +105,26 @@ const Bucket = struct {
             return next.has(page_index, key);
         } else {
             return false;
+        }
+    }
+
+    fn getPtr(bucket: *Bucket, comptime V: type, page_index: *PageIndex, key: Entity) ?*V {
+        const h = hash(key);
+        const fingerprint: u8 = @intCast(h >> 24);
+        for (0..capacity) |probe| {
+            const ix = (h + probe) % capacity;
+            const l = bucket.locs[ix];
+            if (l.index == ix_nil) break;
+            if (l.fingerprint == fingerprint) {
+                const k = page_index.pages[l.page].?.head.keys[l.index];
+                if (k == key) return &page_index.pages[l.page].?.head.vals(V)[l.index];
+            }
+        }
+
+        if (bucket.head.next) |next| {
+            return next.getPtr(V, page_index, key);
+        } else {
+            return null;
         }
     }
 
@@ -268,9 +289,10 @@ const State = struct {
     }
 
     pub fn getPtr(state: *State, comptime V: type, key: Entity) ?*V {
-        std.debug.assert(key != nil);
-        _ = state;
-        return null;
+        if (state.n_buckets == 0) return null;
+        if (key == nil) return null;
+        const bucket_ix = state.bucketIndex(key);
+        return state.bucket_index.buckets[bucket_ix].?.getPtr(V, state.page_index, key);
     }
 
     /// overwrites if present, inserts if not
@@ -401,15 +423,19 @@ test "scratch" {
     defer s.deinit();
 
     for (1..10) |i| {
-        s.set(i64, i, @intCast(i));
+        s.set(i64, i, @intCast(i * i));
     }
     s.debugPrint(i64);
 
-    for (1..10) |i| {
-        try std.testing.expect(s.has(i));
-    }
-    for (1..10) |i| {
-        try std.testing.expect(s.has(i));
+    for (0..11) |i| {
+        if (i < 1 or i >= 10) {
+            try std.testing.expect(!s.has(i));
+            try std.testing.expect(s.getPtr(i64, i) == null);
+        } else {
+            try std.testing.expect(s.has(i));
+            const v: i64 = @intCast(i * i);
+            try std.testing.expect(s.getPtr(i64, i).?.* == v);
+        }
     }
 }
 
