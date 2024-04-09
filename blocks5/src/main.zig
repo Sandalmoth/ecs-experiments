@@ -19,8 +19,7 @@ const BucketHeader = struct {
     len: usize,
 };
 const Bucket = struct {
-    // const capacity = 997;
-    const capacity = 11;
+    const capacity = 997;
     const Location = packed struct {
         fingerprint: u8,
         page: u12,
@@ -98,7 +97,6 @@ const Bucket = struct {
         const fingerprint: u8 = @intCast(h >> 24);
         for (0..capacity) |probe| {
             const ix = (h + probe) % capacity;
-            std.debug.print("{}\n", .{ix});
             const l = bucket.locs[ix];
             if (l.index == ix_nil) break;
             if (l.fingerprint == fingerprint) {
@@ -207,10 +205,19 @@ const Bucket = struct {
             next.del(alloc, page_index, n_pages, key);
             if (next.head.len == 0) {
                 bucket.head.next = next.head.next;
+                next.head.next = null;
                 next.destroy(alloc);
             } else if (bucket.head.len + next.head.len < merge_max) {
-                std.debug.print("WANT TO MERGE BUCKET\n", .{});
-                // TODO
+                bucket.head.next = next.head.next;
+                next.head.next = null;
+                for (0..capacity) |i| {
+                    const l = next.locs[i];
+                    if (l.index != ix_nil) {
+                        const k = page_index.pages[l.page].?.head.keys[l.index];
+                        bucket.set(alloc, page_index, k, l.page, l.index);
+                    }
+                }
+                next.destroy(alloc);
             }
         }
     }
@@ -263,8 +270,7 @@ const Page = struct {
         page.head = .{
             .keys = undefined,
             ._vals = undefined,
-            // .capacity = page.bytes.len / (@sizeOf(Entity) + @sizeOf(V)),
-            .capacity = 4,
+            .capacity = page.bytes.len / (@sizeOf(Entity) + @sizeOf(V)),
             .len = 0,
             .modified = false,
             .refcount = 1,
@@ -414,9 +420,6 @@ const State = struct {
         const last_loc = state.bucket_index.buckets[last_bucket_ix].?
             .getLocPtr(state.page_index, last_key).?;
 
-        std.debug.print("{}\n", .{loc});
-        std.debug.print("{}\n", .{last_loc});
-
         state.page_index.pages[last_loc.page].?.head.keys[last_loc.index] =
             state.page_index.pages[loc.page].?.head.keys[loc.index];
         state.page_index.pages[last_loc.page].?.head.vals(V)[last_loc.index] =
@@ -501,8 +504,6 @@ const State = struct {
             state.bucket_split = 0;
             state.bucket_round = 0;
         }
-
-        std.debug.print("MERGING!\n", .{});
 
         const index = state.bucket_index;
         const merging = index.buckets[state.n_buckets - 1].?;
@@ -629,6 +630,52 @@ test "scratch" {
         s.del(i64, i);
         s.debugPrint(i64);
     }
+}
+
+test "fuzz (no copy)" {
+    var s = State.init(std.testing.allocator);
+    defer s.deinit();
+    var h = std.AutoHashMap(Entity, f64).init(std.testing.allocator);
+    defer h.deinit();
+    var a = try std.ArrayList(Entity).initCapacity(std.testing.allocator, 64 * 1024);
+    defer a.deinit();
+
+    var rng = std.rand.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+    var rand = rng.random();
+
+    for (0..64) |_| {
+        for (0..1024) |_| {
+            const k = rand.int(Entity) | 1;
+            const v: f64 = @floatFromInt(k);
+            try std.testing.expectEqual(h.contains(k), s.has(k));
+            if (s.has(k)) continue;
+            s.set(f64, k, v);
+            try h.put(k, v);
+            try a.append(k);
+        }
+
+        for (a.items) |k| {
+            if (rand.int(Entity) < k) continue;
+            const v: f64 = @floatFromInt(k);
+            try std.testing.expectEqual(h.contains(k), s.has(k));
+            if (s.has(k)) {
+                try std.testing.expectEqual(h.getPtr(k).?.*, s.getPtr(f64, k).?.*);
+                s.del(f64, k);
+                _ = h.remove(k);
+            } else {
+                try std.testing.expectEqual(null, s.getPtr(f64, k));
+                s.set(f64, k, v);
+                try h.put(k, v);
+            }
+        }
+    }
+
+    var it = h.keyIterator();
+    while (it.next()) |k| {
+        try std.testing.expect(s.has(k.*));
+        s.del(f64, k.*);
+    }
+    try std.testing.expectEqual(0, s.len);
 }
 
 pub fn main() void {}
