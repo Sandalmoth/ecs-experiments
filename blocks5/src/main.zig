@@ -84,6 +84,7 @@ const Bucket = struct {
                 if (k == key) break;
             }
         }
+        bucket.head.len += if (bucket.locs[ix].index == ix_nil) 1 else 0;
         bucket.locs[ix] = .{
             .fingerprint = fingerprint,
             .page = page,
@@ -97,6 +98,7 @@ const Bucket = struct {
         const fingerprint: u8 = @intCast(h >> 24);
         for (0..capacity) |probe| {
             const ix = (h + probe) % capacity;
+            std.debug.print("{}\n", .{ix});
             const l = bucket.locs[ix];
             if (l.index == ix_nil) break;
             if (l.fingerprint == fingerprint) {
@@ -185,10 +187,11 @@ const Bucket = struct {
                             .page = undefined,
                             .index = ix_nil,
                         };
+                        bucket.head.len -= 1;
                         return;
                     }
                     const k_shift = page_index.pages[l_shift.page].?.head.keys[l_shift.index];
-                    const key_dist = (ix_shift -% hash(k_shift)) % capacity;
+                    const key_dist = (ix_shift + capacity - (hash(k_shift) % capacity)) % capacity;
                     if (key_dist >= dist) {
                         bucket.locs[ix_remove] = bucket.locs[ix_shift];
                         ix_remove = ix_shift;
@@ -621,16 +624,11 @@ test "scratch" {
         s.del(i64, i);
         s.debugPrint(i64);
     }
-    for (1..7) |i| {
-        // for (1..10) |i| {
+    for (1..10) |i| {
         if (i % 2 == 0) continue;
         s.del(i64, i);
         s.debugPrint(i64);
     }
-    s.del(i64, 7);
-    s.debugPrint(i64);
-    s.del(i64, 9);
-    s.debugPrint(i64);
 }
 
 pub fn main() void {}
