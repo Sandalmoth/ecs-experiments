@@ -19,7 +19,7 @@ const BucketHeader = struct {
     len: usize,
 };
 const Bucket = struct {
-    const capacity = 997;
+    const capacity = 512; // wastes a lot of space, but is so much faster
     const Location = packed struct {
         fingerprint: u8,
         page: u12,
