@@ -226,6 +226,39 @@ const Bucket = struct {
         return std.hash.XxHash32.hash(BUCKET_PRIME, std.mem.asBytes(&key));
     }
 
+    const Iterator = struct {
+        bucket: ?*Bucket,
+        cursor: usize = 0,
+
+        pub fn next(it: *Iterator) ?Location {
+            if (it.bucket == null) return null;
+
+            while (true) {
+                if (it.cursor == 0) {
+                    if (it.bucket.?.head.next) |_next| {
+                        it.bucket = _next;
+                        it.cursor = capacity;
+                    } else {
+                        it.bucket = null;
+                        return null;
+                    }
+                }
+
+                it.cursor -= 1;
+                if (it.bucket.?.locs[it.cursor].index != ix_nil) {
+                    return it.bucket.?.locs[it.cursor];
+                }
+            }
+        }
+    };
+
+    fn iterator(bucket: *Bucket) Iterator {
+        return .{
+            .bucket = bucket,
+            .cursor = capacity,
+        };
+    }
+
     fn debugPrint(bucket: Bucket, page_index: *PageIndex) void {
         std.debug.print(" [ ", .{});
         for (0..capacity) |i| {
@@ -453,12 +486,15 @@ pub const State = struct {
         index_cursor: usize,
 
         pub fn next(it: *Iterator) ?Entity {
-            if (it.page_cursor == 0) return null;
-            if (it.index_cursor == std.math.maxInt(usize)) {
-                it.page_cursor -= 1;
-                it.index_cursor = it.state.page_index.pages[it.page_cursor].?.head.len;
+            if (it.index_cursor == 0) {
+                if (it.page_cursor == 0) {
+                    return null;
+                } else {
+                    it.page_cursor -= 1;
+                    it.index_cursor = it.state.page_index.pages[it.page_cursor].?.head.len;
+                    if (it.index_cursor == 0) return null;
+                }
             }
-            if (it.index_cursor == 0) return null;
             it.index_cursor -= 1;
             return it.state.page_index.pages[it.page_cursor].?.head.keys[it.index_cursor];
         }
@@ -468,14 +504,14 @@ pub const State = struct {
         return .{
             .state = state,
             .page_cursor = state.n_pages,
-            .index_cursor = std.math.maxInt(usize),
+            .index_cursor = 0,
         };
     }
 
     fn bucketLoad(state: State) f64 {
         return if (state.n_buckets > 0)
             @as(f64, @floatFromInt(state.len)) /
-                @as(f64, @floatFromInt(Bucket.capacity))
+                @as(f64, @floatFromInt(Bucket.capacity * state.n_buckets))
         else
             return 1.0;
     }
@@ -497,7 +533,8 @@ pub const State = struct {
         state.bucket_split += 1;
         state.n_buckets += 1;
 
-        for (splitting.locs) |loc| {
+        var it = splitting.iterator();
+        while (it.next()) |loc| {
             if (loc.index == Bucket.ix_nil) continue;
             const key = state.page_index.pages[loc.page].?.head.keys[loc.index];
             const bucket_ix = state.bucketIndex(key);
@@ -542,9 +579,12 @@ pub const State = struct {
         }
         state.n_buckets -= 1;
 
-        for (merging.locs) |loc| {
+        var it = merging.iterator();
+        while (it.next()) |loc| {
             if (loc.index == Bucket.ix_nil) continue;
             const key = state.page_index.pages[loc.page].?.head.keys[loc.index];
+            const bucket_ix = state.bucketIndex(key);
+            std.debug.assert(bucket_ix == state.bucket_split);
             index.buckets[state.bucket_split].?.set(
                 state.alloc,
                 state.page_index,
@@ -629,6 +669,9 @@ test "scratch" {
     var s = State.init(std.testing.allocator);
     defer s.deinit();
 
+    std.debug.print("{}\n", .{s.bucket_index.buckets.len});
+    std.debug.print("{}\n", .{s.page_index.pages.len});
+
     for (1..10) |i| {
         s.set(i64, i, @intCast(i * i));
     }
@@ -656,6 +699,34 @@ test "scratch" {
         s.debugPrint(i64);
     }
 }
+
+// test "load" {
+//     std.debug.print("\n", .{});
+//     std.debug.print("{}\n", .{@sizeOf(State)});
+
+//     var s = State.init(std.testing.allocator);
+//     defer s.deinit();
+
+//     const N = 1750;
+//     const M = 89;
+//     for (1..N) |i| {
+//         s.set(i64, i, @intCast(i * i));
+//         if (i % M == 0) std.debug.print(
+//             "{}\t{d:.3}\t{}\n",
+//             .{ s.len, s.bucketLoad(), s.n_buckets },
+//         );
+//     }
+//     for (1..N) |i| {
+//         std.debug.print("{}\n", .{i});
+//         s.debugPrint(i64);
+//         try std.testing.expect(s.has(i));
+//         s.del(i64, i);
+//         if (i % M == 0) std.debug.print(
+//             "{}\t{d:.3}\t{}\n",
+//             .{ s.len, s.bucketLoad(), s.n_buckets },
+//         );
+//     }
+// }
 
 test "fuzz (no copy)" {
     var s = State.init(std.testing.allocator);
