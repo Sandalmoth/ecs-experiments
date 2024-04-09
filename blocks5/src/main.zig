@@ -411,6 +411,9 @@ const State = struct {
         const last_loc = state.bucket_index.buckets[last_bucket_ix].?
             .getLocPtr(state.page_index, last_key).?;
 
+        std.debug.print("{}\n", .{loc});
+        std.debug.print("{}\n", .{last_loc});
+
         state.page_index.pages[last_loc.page].?.head.keys[last_loc.index] =
             state.page_index.pages[loc.page].?.head.keys[loc.index];
         state.page_index.pages[last_loc.page].?.head.vals(V)[last_loc.index] =
@@ -486,9 +489,42 @@ const State = struct {
     }
 
     fn bucketShrink(state: *State) void {
-        std.debug.print("WANT TO SHRINK BUCKET\n", .{});
-        // TODO
-        _ = state;
+        if (state.n_buckets == 0) return;
+        if (state.n_buckets == 1) {
+            if (state.len > 0) return;
+            // state is empty, destroy the last bucket and just reset to initial state
+            state.bucket_index.buckets[0].?.destroy(state.alloc);
+            state.n_buckets = 0;
+            state.bucket_split = 0;
+            state.bucket_round = 0;
+        }
+
+        std.debug.print("MERGING!\n", .{});
+
+        const index = state.bucket_index;
+        const merging = index.buckets[state.n_buckets - 1].?;
+        index.buckets[state.n_buckets - 1] = null;
+
+        if (state.bucket_split > 0) {
+            state.bucket_split -= 1;
+        } else {
+            state.bucket_split = (@as(usize, 1) << @intCast(state.bucket_round - 1)) - 1;
+            state.bucket_round -= 1;
+        }
+        state.n_buckets -= 1;
+
+        for (merging.locs) |loc| {
+            if (loc.index == Bucket.ix_nil) continue;
+            const key = state.page_index.pages[loc.page].?.head.keys[loc.index];
+            index.buckets[state.bucket_split].?.set(
+                state.alloc,
+                state.page_index,
+                key,
+                loc.page,
+                loc.index,
+            );
+        }
+        merging.destroy(state.alloc);
     }
 
     fn bucketSet(state: *State, key: Entity, page: usize, index: usize) void {
@@ -580,13 +616,20 @@ test "scratch" {
         }
     }
 
-    s.del(i64, 2);
+    for (1..10) |i| {
+        if (i % 2 == 1) continue;
+        s.del(i64, i);
+        s.debugPrint(i64);
+    }
+    for (1..7) |i| {
+        // for (1..10) |i| {
+        if (i % 2 == 0) continue;
+        s.del(i64, i);
+        s.debugPrint(i64);
+    }
+    s.del(i64, 7);
     s.debugPrint(i64);
-    s.del(i64, 4);
-    s.debugPrint(i64);
-    s.del(i64, 6);
-    s.debugPrint(i64);
-    s.del(i64, 8);
+    s.del(i64, 9);
     s.debugPrint(i64);
 }
 
