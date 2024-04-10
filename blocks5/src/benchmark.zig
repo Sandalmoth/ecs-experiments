@@ -15,7 +15,7 @@ fn bench5b(alloc: std.mem.Allocator) !void {
     var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
     var rand = rng.random();
 
-    std.debug.print("len_1\t\t\tlen_2\t\t\tlen_3\t\t\tins\tdel\titer_1\titer_12\titer_123\n", .{});
+    std.debug.print("len_1\t\t\tlen_2\t\t\tlen_3\t\t\tins\tdel\tcopy\tdeinit\titer_1\titer_12\titer_123\n", .{});
 
     for (6..18) |log_n| {
         const n: u32 = @as(u32, 1) << @intCast(log_n);
@@ -64,6 +64,18 @@ fn bench5b(alloc: std.mem.Allocator) !void {
         }
         const t_del = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n_del));
 
+        var old_s0 = s0;
+        s0 = s0.copy(u32);
+        var old_s1 = s1;
+        s1 = s1.copy(u32);
+        var old_s2 = s2;
+        s2 = s2.copy(u32);
+        const t_copy = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0.len + s1.len + s2.len));
+        old_s0.deinit();
+        old_s1.deinit();
+        old_s2.deinit();
+        const t_deinit = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0.len + s1.len + s2.len));
+
         // then do some iteration passes over one component while fetching the others
         var nit: usize = 0;
         var it2 = s2.iterator();
@@ -97,7 +109,7 @@ fn bench5b(alloc: std.mem.Allocator) !void {
         const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(nit));
 
         std.debug.print(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
             .{
                 s0.len,
                 s0.n_buckets,
@@ -110,6 +122,8 @@ fn bench5b(alloc: std.mem.Allocator) !void {
                 s2.n_pages,
                 t_ins,
                 t_del,
+                t_copy,
+                t_deinit,
                 t_it0,
                 t_it1,
                 t_it2,
