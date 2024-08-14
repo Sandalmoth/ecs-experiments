@@ -775,7 +775,7 @@ test "fuzz (no copy)" {
     var a = try std.ArrayList(Entity).initCapacity(std.testing.allocator, 64 * 1024);
     defer a.deinit();
 
-    var rng = std.rand.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+    var rng = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
     var rand = rng.random();
 
     for (0..64) |_| {
@@ -824,7 +824,7 @@ test "fuzz (with copy)" {
     var a = try std.ArrayList(Entity).initCapacity(std.testing.allocator, 16 * 1024);
     defer a.deinit();
 
-    var rng = std.rand.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+    var rng = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
     var rand = rng.random();
 
     for (0..N) |i| {
