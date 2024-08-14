@@ -43,9 +43,14 @@ const Bucket = struct {
             .next = null,
             .len = 0,
         };
+        // compiler bug?
+        // we only need .index to be set, so undefined for the others makes sense
+        // however, this results in no initialization at all
         bucket.locs = .{Location{
-            .fingerprint = undefined,
-            .page = undefined,
+            // .fingerprint = undefined,
+            // .page = undefined,
+            .fingerprint = 0,
+            .page = 0,
             .index = ix_nil,
         }} ** capacity;
         return bucket;
@@ -180,9 +185,12 @@ const Bucket = struct {
                     ix_shift = (ix_shift + 1) % capacity;
                     const l_shift = bucket.locs[ix_shift];
                     if (l_shift.index == ix_nil) {
+                        // compiler bug? see above
                         bucket.locs[ix_remove] = .{
-                            .fingerprint = undefined,
-                            .page = undefined,
+                            // .fingerprint = undefined,
+                            // .page = undefined,
+                            .fingerprint = 0,
+                            .page = 0,
                             .index = ix_nil,
                         };
                         bucket.head.len -= 1;
