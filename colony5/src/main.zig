@@ -1,11 +1,11 @@
 const std = @import("std");
 
-pub fn SegmentType(comptime T: type) type {
+fn SegmentType(comptime T: type) type {
     return struct {
         const Self = @This();
         const Skipfield = u8;
 
-        const Node = extern union {
+        const Node = union {
             value: T,
             next: Skipfield,
         };
@@ -71,15 +71,18 @@ pub fn SegmentType(comptime T: type) type {
 
         fn insertFree(segment: *Self) *T {
             std.debug.assert(segment.header.free != NIL);
+            const next = segment.data[segment.header.free].next;
+            segment.data[segment.header.free] = .{ .value = undefined };
             const result = &segment.data[segment.header.free].value;
             segment.setUnskip(segment.header.free);
-            segment.header.free = segment.data[segment.header.free].next;
+            segment.header.free = next;
             segment.header.len += 1;
             return result;
         }
 
         fn insertEnd(segment: *Self) *T {
             std.debug.assert(segment.header.len < CAPACITY);
+            segment.data[segment.header.len] = .{ .value = undefined };
             const result = &segment.data[segment.header.len].value;
             segment.setUnskip(segment.header.len);
             segment.header.len += 1;
@@ -90,7 +93,7 @@ pub fn SegmentType(comptime T: type) type {
             std.debug.assert(segment.header.len > 0);
             const i = segment.index(ptr);
             segment.setSkip(i);
-            segment.data[i].next = segment.header.free;
+            segment.data[i] = .{ .next = segment.header.free };
             segment.header.free = @intCast(i);
             segment.header.len -= 1;
         }
