@@ -25,8 +25,10 @@ pub fn SegmentType(comptime T: type) type {
 
         const Header = struct {
             len: usize,
-            free_segment: ?*Self,
+            next_free: ?*Self,
+            prev_free: ?*Self,
             next: ?*Self,
+            prev: ?*Self,
             free: Skipfield,
         };
 
@@ -46,8 +48,10 @@ pub fn SegmentType(comptime T: type) type {
 
             segment.header = .{
                 .len = 0,
-                .free_segment = null,
+                .next_free = null,
+                .prev_free = null,
                 .next = null,
+                .prev = null,
                 .free = NIL,
             };
 
@@ -119,7 +123,7 @@ pub fn SegmentType(comptime T: type) type {
             const l = if (loc > 0) segment.skip[loc - 1] else 0;
             const r = segment.skip[loc + 1];
 
-            if (l + r == 0) {
+            if (@as(u32, @intCast(l)) + @as(u32, @intCast(r)) == 0) {
                 segment.skip[loc] = 1;
             } else if (r == 0) {
                 segment.skip[loc] = 1 + segment.skip[loc - 1];
@@ -156,7 +160,7 @@ pub fn SegmentType(comptime T: type) type {
             const l = if (loc > 0) segment.skip[loc - 1] else 0;
             const r = segment.skip[loc + 1];
 
-            if (l + r == 0) {
+            if (@as(u32, @intCast(l)) + @as(u32, @intCast(r)) == 0) {
                 std.debug.assert(segment.skip[loc] == 1);
                 segment.skip[loc] = 0;
             } else if (r == 0) {
@@ -203,14 +207,14 @@ pub fn Colony(comptime T: type) type {
 
         alloc: std.mem.Allocator,
         head: ?*Segment,
-        free_segment: ?*Segment,
+        free: ?*Segment,
         len: usize,
 
         pub fn init(alloc: std.mem.Allocator) Self {
             return .{
                 .alloc = alloc,
                 .head = null,
-                .free_segment = null,
+                .free = null,
                 .len = 0,
             };
         }
@@ -225,13 +229,15 @@ pub fn Colony(comptime T: type) type {
         }
 
         pub fn insert(colony: *Self) !*T {
-            if (colony.free_segment) |segment| {
+            if (colony.free) |segment| {
                 const result = segment.insertFree();
                 colony.len += 1;
                 if (!segment.hasFree()) {
                     // we used the last free slot in this segment, remove from free list
-                    colony.free_segment = segment.header.free_segment;
-                    segment.header.free_segment = null;
+                    std.debug.assert(segment.header.prev_free == null);
+                    if (segment.header.next_free) |next| next.header.prev_free = null;
+                    colony.free = segment.header.next_free;
+                    segment.header.next_free = null;
                 }
                 return result;
             }
@@ -239,6 +245,7 @@ pub fn Colony(comptime T: type) type {
                 colony.head = try Segment.create(colony.alloc);
             } else if (colony.head.?.isFull()) {
                 const new = try Segment.create(colony.alloc);
+                colony.head.?.header.prev = new;
                 new.header.next = colony.head;
                 colony.head = new;
             }
@@ -252,10 +259,22 @@ pub fn Colony(comptime T: type) type {
             const segment = Segment.basePtr(ptr);
             const has_free = segment.hasFree();
             segment.erase(ptr);
-            if (!has_free) {
+            if (segment.header.len == 0) {
+                // no items left, dealloc
+                if (colony.head.? == segment) colony.head = segment.header.next;
+                if (segment.header.prev) |prev| prev.header.next = segment.header.next;
+                if (segment.header.next) |next| next.header.prev = segment.header.prev;
+                if (colony.free.? == segment) colony.free = segment.header.next_free;
+                if (segment.header.prev_free) |prev|
+                    prev.header.next_free = segment.header.next_free;
+                if (segment.header.next_free) |next|
+                    next.header.prev_free = segment.header.prev_free;
+                segment.destroy(colony.alloc);
+            } else if (!has_free) {
                 // we didn't previously have any free segments, so put on free list
-                segment.header.free_segment = colony.free_segment;
-                colony.free_segment = segment;
+                segment.header.next_free = colony.free;
+                if (colony.free) |next| next.header.prev_free = segment;
+                colony.free = segment;
             }
             colony.len -= 1;
         }
@@ -341,6 +360,71 @@ test "scratch" {
             acc +%= p.*;
         }
         std.debug.assert(acc == acc_reference); // 2
+    }
+
+    for (contents.items) |p| colony.erase(p);
+    std.debug.assert(colony.head == null);
+    std.debug.assert(colony.len == 0);
+
+    contents.clearRetainingCapacity();
+    acc_reference = 0;
+    for (0..N) |i| {
+        const p = try colony.insert();
+        p.* = @intCast(i);
+        try contents.append(p);
+        acc_reference +%= i;
+    }
+    std.debug.assert(colony.len == contents.items.len);
+
+    {
+        var acc: usize = 0;
+        var it = colony.iterator();
+        while (it.next()) |p| {
+            acc +%= p.*;
+        }
+        std.debug.assert(acc == acc_reference); // 3
+    }
+}
+
+test "fuzz - delete almost all" {
+    var rng = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+    const rand = rng.random();
+
+    const N = 10000;
+    const M = 10;
+
+    var colony = Colony(usize).init(std.testing.allocator);
+    defer colony.deinit();
+    var contents = std.ArrayList(*usize).init(std.testing.allocator);
+    defer contents.deinit();
+    var values = std.ArrayList(usize).init(std.testing.allocator);
+    defer values.deinit();
+
+    for (0..10) |_| {
+        while (colony.len < N) {
+            const p = try colony.insert();
+            p.* = rand.int(usize);
+            try contents.append(p);
+            try values.append(p.*);
+        }
+
+        while (colony.len > M) {
+            const i = rand.uintLessThan(usize, contents.items.len);
+            colony.erase(contents.items[i]);
+            _ = contents.swapRemove(i);
+            _ = values.swapRemove(i);
+        }
+
+        var acc_ref: usize = 0;
+        for (values.items) |x| {
+            acc_ref +%= x;
+        }
+        var acc: usize = 0;
+        var it = colony.iterator();
+        while (it.next()) |p| {
+            acc +%= p.*;
+        }
+        try std.testing.expect(acc == acc_ref);
     }
 }
 
