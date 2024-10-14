@@ -53,6 +53,12 @@ pub fn Hive(comptime T: type) type {
             }
 
             fn destroy(segment: *Segment, alloc: std.mem.Allocator) void {
+                if (segment.prev_segment) |prev| {
+                    prev.next_segment = segment.next_segment;
+                }
+                if (segment.next_segment) |next| {
+                    next.prev_segment = segment.prev_segment;
+                }
                 if (segment.prev_free_segment) |prev| {
                     prev.next_free_segment = segment.next_free_segment;
                 }
@@ -119,15 +125,10 @@ pub fn Hive(comptime T: type) type {
                     segment.len -= 1;
                     segment.first_free_data = @intCast(ix);
                 } else if (skip_left > 0 and skip_right == 0) {
-                    // std.debug.print("1: {any}\n", .{segment.skip});
-                    // if (segment.skip[ix - 1] > 1)
                     segment.skip[ix - segment.skip[ix - 1]] += 1;
-                    // std.debug.print("2: {any}\n", .{segment.skip});
                     segment.skip[ix] = segment.skip[ix - 1];
-                    // std.debug.print("3: {any}\n", .{segment.skip});
                     segment.len -= 1;
                 } else if (skip_left == 0 and skip_right > 0) {
-                    // if (segment.skip[ix + 1] > 1)
                     segment.skip[ix + segment.skip[ix + 1]] += 1;
                     segment.skip[ix] = segment.skip[ix + 1];
                     segment.data[ix] = .{ .node = .{
@@ -140,7 +141,9 @@ pub fn Hive(comptime T: type) type {
                     segment.len -= 1;
                     segment.first_free_data = @intCast(ix);
                 } else if (skip_left > 0 and skip_right > 0) {
-                    //
+                    segment.skip[ix - segment.skip[ix - 1]] += 1 + segment.skip[ix + 1];
+                    segment.skip[ix + segment.skip[ix + 1]] += 1 + segment.skip[ix - 1];
+                    segment.len -= 1;
                 } else unreachable;
             }
         };
@@ -220,6 +223,35 @@ pub fn Hive(comptime T: type) type {
             std.debug.assert(hive == it.hive);
             const segment = it.segment orelse return;
             std.debug.assert(segment.len <= segment.data.len);
+            if (segment.len == 1) {
+                // segment will become empty after deletion
+                // if this will be the new reserve, actually erase so it's correctly reusable
+                // otherwise, we can just destroy it outright
+                // (NOTE would it be more optimal to reinitialize rather than erase?)
+                if (hive.reserve_segment != null and
+                    hive.reserve_segment.?.data.len >= segment.data.len)
+                {
+                    segment.destroy(hive.alloc);
+                }
+
+                if (hive.reserve_segment) |reserve| reserve.destroy(hive.alloc);
+                segment.erase(it.cursor);
+                if (segment.prev_segment) |prev| {
+                    prev.next_segment = segment.next_segment;
+                }
+                if (segment.next_segment) |next| {
+                    next.prev_segment = segment.prev_segment;
+                }
+                if (segment.prev_free_segment) |prev| {
+                    prev.next_free_segment = segment.next_free_segment;
+                }
+                if (segment.next_free_segment) |next| {
+                    next.prev_free_segment = segment.prev_free_segment;
+                }
+                hive.reserve_segment = segment;
+                return;
+            }
+
             if (segment.len == segment.data.len) {
                 // since the segment was full, it cannot have been in the free list, so add it
                 std.debug.assert(segment.next_free_segment == null);
@@ -303,6 +335,37 @@ fn test_replace_2(it1: *Hive(u32).Iterator, it2: *Hive(u32).Iterator, x1: u32, x
     std.debug.print("\n", .{});
 }
 
+fn test_replace_3(
+    it1: *Hive(u32).Iterator,
+    it2: *Hive(u32).Iterator,
+    it3: *Hive(u32).Iterator,
+    x1: u32,
+    x2: u32,
+    x3: u32,
+) !void {
+    const hive = it1.hive;
+
+    hive.erase(it1.*);
+    hive.erase(it2.*);
+    hive.erase(it3.*);
+
+    var it = hive.iterator();
+    while (it.next()) |y| {
+        std.debug.print("{} ", .{y});
+    }
+    std.debug.print("\n", .{});
+
+    it3.* = try hive.insert(x3);
+    it2.* = try hive.insert(x2);
+    it1.* = try hive.insert(x1);
+
+    it = hive.iterator();
+    while (it.next()) |y| {
+        std.debug.print("{} ", .{y});
+    }
+    std.debug.print("\n", .{});
+}
+
 test "hive" {
     var hive = Hive(u32).init(std.testing.allocator);
     defer hive.deinit();
@@ -331,15 +394,23 @@ test "hive" {
     // std.debug.print("{any}\n", .{hive.first_free_segment.?.data});
     // std.debug.print("{any}\n", .{hive.first_free_segment.?.skip});
 
+    std.debug.print("single replace\n", .{});
     x2 = try test_replace(x2, 3434);
     x3 = try test_replace(x3, 4545);
     x4 = try test_replace(x4, 5656);
     x5 = try test_replace(x5, 6767);
 
-    try test_replace_2(&x2, &x3, 34, 45);
-    try test_replace_2(&x3, &x2, 3434, 4545);
-    try test_replace_2(&x4, &x5, 56, 67);
-    try test_replace_2(&x5, &x4, 5656, 6767);
+    std.debug.print("double replace\n", .{});
+    try test_replace_2(&x2, &x3, 45, 34);
+    try test_replace_2(&x3, &x2, 4545, 3434);
+    try test_replace_2(&x4, &x5, 67, 56);
+    try test_replace_2(&x5, &x4, 6767, 5656);
+    try test_replace_2(&x2, &x5, 34, 67);
+    try test_replace_2(&x5, &x2, 6767, 3434);
+
+    std.debug.print("triple replace\n", .{});
+    try test_replace_3(&x2, &x3, &x4, 54, 45, 34);
+    try test_replace_3(&x2, &x4, &x3, 5454, 4545, 3434);
 }
 
 pub fn main() !void {}
