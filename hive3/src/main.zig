@@ -27,7 +27,6 @@ pub fn Hive(comptime T: type) type {
             first_free_data: Skipfield,
 
             fn create(alloc: std.mem.Allocator, capacity: Skipfield) !*Segment {
-                std.debug.assert(std.math.isPowerOfTwo(capacity));
                 const segment = try alloc.create(Segment);
                 errdefer alloc.destroy(segment);
                 segment.data = try alloc.alloc(Data, capacity);
@@ -71,12 +70,14 @@ pub fn Hive(comptime T: type) type {
             }
 
             fn insert(segment: *Segment, value: T) !usize {
-                // std.debug.print("{}\n", .{segment.first_free_data});
-                // std.debug.print("{any}\n", .{segment.skip});
+                // std.debug.print("instert start {}\n", .{segment.first_free_data});
+                // std.debug.print("instert start {any}\n", .{segment.skip});
                 // free block has more than 1 element - just insert
                 // free block has exactly 1 element - special case skiplist edit
                 std.debug.assert(segment.len < segment.data.len);
                 const ix = segment.first_free_data;
+                std.debug.assert(segment.skip[ix] > 0);
+                std.debug.assert(segment.skip[ix] == segment.skip[ix + segment.skip[ix] - 1]);
                 const free_block = segment.data[ix].node;
                 const free_block_len = segment.skip[ix];
                 std.debug.assert(free_block_len > 0);
@@ -84,6 +85,7 @@ pub fn Hive(comptime T: type) type {
                 segment.skip[ix + 1] = segment.skip[ix] - 1;
                 if (segment.skip[ix] > 2) segment.skip[ix + segment.skip[ix] - 1] -= 1;
                 segment.skip[ix] = 0;
+                std.debug.assert(segment.skip[ix + 1] < segment.data.len - ix);
                 // update the erasure list
                 if (free_block_len > 1) {
                     segment.data[ix + 1] = .{ .node = .{
@@ -106,6 +108,8 @@ pub fn Hive(comptime T: type) type {
             }
 
             fn erase(segment: *Segment, ix: usize) void {
+                // std.debug.print("erase start {}\n", .{ix});
+                // std.debug.print("erase start {any}\n", .{segment.skip});
                 // there are four options
                 // a) both neighbours occupied, form new skipblock
                 // b/c) one neighbour occupied (left/right), extend skipblock
@@ -125,12 +129,22 @@ pub fn Hive(comptime T: type) type {
                     segment.len -= 1;
                     segment.first_free_data = @intCast(ix);
                 } else if (skip_left > 0 and skip_right == 0) {
-                    segment.skip[ix - segment.skip[ix - 1]] += 1;
-                    segment.skip[ix] = segment.skip[ix - 1];
+                    // std.debug.print(
+                    //     "left merge {} {} {any}\n",
+                    //     .{ ix, segment.data.len, segment.skip[ix - 1 .. ix + 2] },
+                    // );
+                    const free_block_len = segment.skip[ix - 1] + 1;
+                    segment.skip[ix - segment.skip[ix - 1]] = free_block_len;
+                    segment.skip[ix] = free_block_len;
                     segment.len -= 1;
                 } else if (skip_left == 0 and skip_right > 0) {
-                    segment.skip[ix + segment.skip[ix + 1]] += 1;
-                    segment.skip[ix] = segment.skip[ix + 1];
+                    // std.debug.print(
+                    //     "right merge {} {} {any}\n",
+                    //     .{ ix, segment.data.len, segment.skip[ix - 1 .. ix + 2] },
+                    // );
+                    const free_block_len = segment.skip[ix + 1] + 1;
+                    segment.skip[ix + segment.skip[ix + 1]] = free_block_len;
+                    segment.skip[ix] = free_block_len;
                     segment.data[ix] = .{ .node = .{
                         .prev = @intCast(ix),
                         .next = if (segment.len == segment.data.len)
@@ -141,8 +155,13 @@ pub fn Hive(comptime T: type) type {
                     segment.len -= 1;
                     segment.first_free_data = @intCast(ix);
                 } else if (skip_left > 0 and skip_right > 0) {
-                    segment.skip[ix - segment.skip[ix - 1]] += 1 + segment.skip[ix + 1];
-                    segment.skip[ix + segment.skip[ix + 1]] += 1 + segment.skip[ix - 1];
+                    // std.debug.print(
+                    //     "center join {} {} {any}\n",
+                    //     .{ ix, segment.data.len, segment.skip[ix - 1 .. ix + 2] },
+                    // );
+                    const free_block_len = segment.skip[ix - 1] + segment.skip[ix + 1] + 1;
+                    segment.skip[ix - segment.skip[ix - 1]] = free_block_len;
+                    segment.skip[ix + segment.skip[ix + 1]] = free_block_len;
                     segment.len -= 1;
                 } else unreachable;
             }
@@ -206,7 +225,7 @@ pub fn Hive(comptime T: type) type {
                 2
             else
                 @min(
-                    std.math.maxInt(Skipfield),
+                    std.math.maxInt(Skipfield) - 1,
                     2 * std.math.floorPowerOfTwo(usize, hive.len),
                 );
             const segment = try Segment.create(hive.alloc, capacity);
@@ -411,6 +430,49 @@ test "hive" {
     std.debug.print("triple replace\n", .{});
     try test_replace_3(&x2, &x3, &x4, 54, 45, 34);
     try test_replace_3(&x2, &x4, &x3, 5454, 4545, 3434);
+}
+
+test "hive fuzz" {
+    var hive = Hive(u32).init(std.testing.allocator);
+    defer hive.deinit();
+
+    var rng = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp() *% 89));
+    const rand = rng.random();
+
+    var acc: u64 = 0;
+    var contents = std.ArrayList(struct {
+        value: u32,
+        iterator: Hive(u32).Iterator,
+    }).init(std.testing.allocator);
+    defer contents.deinit();
+
+    for (0..10) |_| {
+        while (hive.len < 100_000) {
+            const x = rand.int(u32);
+            const result = try hive.insert(x);
+            try contents.append(.{
+                .value = x,
+                .iterator = result,
+            });
+            acc += x;
+        }
+        var it = hive.iterator();
+        var total: u64 = 0;
+        while (it.next()) |x| total += x;
+        try std.testing.expect(total == acc);
+
+        while (hive.len > 1000) {
+            const x = rand.uintLessThan(usize, contents.items.len);
+            const result = contents.swapRemove(x);
+            hive.erase(result.iterator);
+            acc -= result.value;
+        }
+
+        it = hive.iterator();
+        total = 0;
+        while (it.next()) |x| total += x;
+        try std.testing.expect(total == acc);
+    }
 }
 
 pub fn main() !void {}
