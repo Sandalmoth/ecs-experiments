@@ -108,7 +108,7 @@ pub fn Hive(comptime T: type) type {
             }
 
             fn erase(segment: *Segment, ix: usize) void {
-                // std.debug.print("erase start {}\n", .{ix});
+                std.debug.print("erase start {} {}\n", .{ ix, segment.data.len });
                 // std.debug.print("erase start {any}\n", .{segment.skip});
                 // there are four options
                 // a) both neighbours occupied, form new skipblock
@@ -145,23 +145,40 @@ pub fn Hive(comptime T: type) type {
                     const free_block_len = segment.skip[ix + 1] + 1;
                     segment.skip[ix + segment.skip[ix + 1]] = free_block_len;
                     segment.skip[ix] = free_block_len;
-                    segment.data[ix] = .{ .node = .{
-                        .prev = @intCast(ix),
-                        .next = if (segment.len == segment.data.len)
-                            @intCast(ix)
-                        else
-                            segment.first_free_data,
-                    } };
+                    const free_block = segment.data[ix + 1].node;
+                    segment.data[ix] = .{
+                        .node = .{
+                            .prev = if (free_block.prev != ix + 1) free_block.prev else @intCast(ix),
+                            .next = if (free_block.next != ix + 1) free_block.next else @intCast(ix),
+                            // .next = if (segment.len == segment.data.len)
+                            //     @intCast(ix)
+                            // else
+                            //     segment.first_free_data,
+                        },
+                    };
                     segment.len -= 1;
                     segment.first_free_data = @intCast(ix);
                 } else if (skip_left > 0 and skip_right > 0) {
-                    // std.debug.print(
-                    //     "center join {} {} {any}\n",
-                    //     .{ ix, segment.data.len, segment.skip[ix - 1 .. ix + 2] },
-                    // );
+                    std.debug.print(
+                        "center join {} {} {any}\n",
+                        .{ ix, segment.data.len, segment.skip[ix - 1 .. ix + 2] },
+                    );
+                    var walk = segment.data[segment.first_free_data].node;
+                    std.debug.print("{}\n", .{walk});
+                    walk = segment.data[walk.next].node;
+                    std.debug.print("{}\n", .{walk});
                     const free_block_len = segment.skip[ix - 1] + segment.skip[ix + 1] + 1;
                     segment.skip[ix - segment.skip[ix - 1]] = free_block_len;
                     segment.skip[ix + segment.skip[ix + 1]] = free_block_len;
+                    // unlink the right (merged) free block from the free list
+                    const free_block = segment.data[ix + 1].node;
+                    if (free_block.prev != ix + 1)
+                        segment.data[free_block.prev].node.next = if (free_block.next != ix + 1)
+                            free_block.next
+                        else
+                            @intCast(free_block.prev);
+                    if (free_block.next != ix + 1)
+                        segment.data[free_block.next].node.prev = free_block.prev;
                     segment.len -= 1;
                 } else unreachable;
             }
@@ -204,8 +221,10 @@ pub fn Hive(comptime T: type) type {
             const segment = hive.first_free_segment orelse try hive.expand();
             std.debug.assert(segment.prev_free_segment == null);
             const cursor = try segment.insert(value);
+            std.debug.assert(cursor < segment.data.len);
             if (segment.len == segment.data.len) {
                 hive.first_free_segment = segment.next_free_segment;
+                if (hive.first_free_segment) |first| first.prev_free_segment = null;
                 segment.next_free_segment = null;
             }
             hive.len += 1;
@@ -218,6 +237,10 @@ pub fn Hive(comptime T: type) type {
 
         fn expand(hive: *Self) !*Segment {
             if (hive.reserve_segment) |segment| {
+                std.debug.assert(hive.reserve_segment.?.prev_segment == null);
+                std.debug.assert(hive.reserve_segment.?.next_segment == null);
+                std.debug.assert(hive.reserve_segment.?.prev_free_segment == null);
+                std.debug.assert(hive.reserve_segment.?.next_free_segment == null);
                 hive.reserve_segment = null;
                 return segment;
             }
@@ -250,24 +273,34 @@ pub fn Hive(comptime T: type) type {
                 if (hive.reserve_segment != null and
                     hive.reserve_segment.?.data.len >= segment.data.len)
                 {
+                    std.debug.print("direct destroy\n", .{});
                     segment.destroy(hive.alloc);
+                } else {
+                    std.debug.print("reserve destroy\n", .{});
+                    if (hive.reserve_segment) |reserve| reserve.destroy(hive.alloc);
+                    segment.erase(it.cursor);
+                    if (segment.prev_segment) |prev| {
+                        prev.next_segment = segment.next_segment;
+                    }
+                    if (segment.next_segment) |next| {
+                        next.prev_segment = segment.prev_segment;
+                    }
+                    if (segment.prev_free_segment) |prev| {
+                        prev.next_free_segment = segment.next_free_segment;
+                    }
+                    if (segment.next_free_segment) |next| {
+                        next.prev_free_segment = segment.prev_free_segment;
+                    }
+
+                    segment.prev_segment = null;
+                    segment.next_segment = null;
+                    segment.prev_free_segment = null;
+                    segment.next_free_segment = null;
+                    std.debug.print("{}\n", .{segment});
+                    hive.reserve_segment = segment;
                 }
 
-                if (hive.reserve_segment) |reserve| reserve.destroy(hive.alloc);
-                segment.erase(it.cursor);
-                if (segment.prev_segment) |prev| {
-                    prev.next_segment = segment.next_segment;
-                }
-                if (segment.next_segment) |next| {
-                    next.prev_segment = segment.prev_segment;
-                }
-                if (segment.prev_free_segment) |prev| {
-                    prev.next_free_segment = segment.next_free_segment;
-                }
-                if (segment.next_free_segment) |next| {
-                    next.prev_free_segment = segment.prev_free_segment;
-                }
-                hive.reserve_segment = segment;
+                hive.len -= 1;
                 return;
             }
 
