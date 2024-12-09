@@ -166,8 +166,8 @@ const Page = struct {
         next: u16,
         prev: u16,
     };
-    fn Data(comptime T: type) type {
-        return union { value: T, node: Node };
+    fn KeyNode(comptime T: type) type {
+        return union { key: u64, node: Node };
     }
 
     fn create(comptime T: type, pool: *BlockPool) !*Page {
