@@ -56,7 +56,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
         n_free: usize,
         mutex: if (single_threaded) DummyMutex else std.Thread.Mutex,
 
-        pub fn init(alloc: std.mem.Allocator) !Pool {
+        pub fn init(alloc: std.mem.Allocator) Pool {
             return .{
                 .alloc = alloc,
                 .segments = std.PriorityQueue(Segment, void, Segment.lessThan).init(
@@ -173,7 +173,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
 }
 
 test "block pool basic functions" {
-    var pool = try BlockPool.init(std.testing.allocator);
+    var pool = BlockPool.init(std.testing.allocator);
     defer pool.deinit();
 
     const types = [_]type{ u8, u32, @Vector(4, f32), [1024]f64 };

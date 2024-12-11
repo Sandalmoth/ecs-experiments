@@ -1,135 +1,36 @@
 const builtin = @import("builtin");
 const std = @import("std");
 
+const BlockPool = @import("block_pool.zig").BlockPool;
+
 const safe_mode = builtin.mode == .Debug or builtin.mode == .ReleaseSafe;
 const single_threaded = builtin.single_threaded;
 
-const ECSInfo = struct {
-    Component: type,
-    Queue: type,
-};
-
-const Builder = struct {
-    const EnumLiteral = @TypeOf(._);
-
-    component_names: []const EnumLiteral,
-    // component_names: []const [:0]const u8,
-    component_types: []const type,
-    queue_names: []const EnumLiteral,
-    // queue_names: []const [:0]const u8,
-    queue_types: []const type,
-
-    const begin = Builder{
-        .component_names = &.{},
-        .component_types = &.{},
-        .queue_names = &.{},
-        .queue_types = &.{},
-    };
-
-    fn addComponent(
-        comptime builder: Builder,
-        comptime component_name: EnumLiteral,
-        comptime component_type: type,
-    ) Builder {
-        return Builder{
-            .component_names = builder.component_names ++ .{component_name},
-            .component_types = builder.component_types ++ .{component_type},
-            .queue_names = builder.queue_names,
-            .queue_types = builder.queue_types,
-        };
-    }
-
-    fn addQueue(
-        comptime builder: Builder,
-        comptime queue_name: EnumLiteral,
-        comptime queue_type: type,
-    ) Builder {
-        return Builder{
-            .component_names = builder.component_names,
-            .component_types = builder.component_types,
-            .queue_names = builder.queue_names ++ .{queue_name},
-            .queue_types = builder.queue_types ++ .{queue_type},
-        };
-    }
-
-    fn end(comptime builder: Builder) ECSInfo {
-        const n_components = builder.component_names.len;
-        const n_queues = builder.queue_names.len;
-        var component_enum_fields: [n_components]std.builtin.Type.EnumField = undefined;
-        var queue_enum_fields: [n_queues]std.builtin.Type.EnumField = undefined;
-        var decls = [_]std.builtin.Type.Declaration{};
-
-        inline for (builder.component_names, 0..) |name, i| {
-            component_enum_fields[i] = .{
-                .name = @tagName(name),
-                .value = i,
-            };
-        }
-
-        inline for (builder.queue_names, 0..) |name, i| {
-            queue_enum_fields[i] = .{
-                .name = @tagName(name),
-                .value = i,
-            };
-        }
-
-        return .{
-            .Component = @Type(.{ .@"enum" = .{
-                .tag_type = std.math.IntFittingRange(0, n_components - 1),
-                .fields = &component_enum_fields,
-                .decls = &decls,
-                .is_exhaustive = true,
-            } }),
-            .Queue = @Type(.{ .@"enum" = .{
-                .tag_type = std.math.IntFittingRange(0, n_queues - 1),
-                .fields = &queue_enum_fields,
-                .decls = &decls,
-                .is_exhaustive = true,
-            } }),
-        };
-    }
-};
-
-pub fn ECS(comptime info: ECSInfo) type {
-
-    // var enumFields: [builder.compo.len]std.builtin.Type.EnumField = undefined;
-
+pub fn ECS(comptime Components: type, comptime Queues: type) type {
     return struct {
-        const Component = info.Component;
-        const Queue = info.Queue;
+        const Self = @This();
 
-        fn foo(c: Component) void {
-            std.debug.print("{s}\n", .{@tagName(c)});
+        const Component = std.meta.FieldEnum(Components);
+        const n_components = std.meta.fields(Component).len;
+        fn ComponentType(comptime c: Component) type {
+            return @FieldType(Components, @tagName(c));
         }
 
-        // const Component = @Type(.{
-        //     .@"enum" = .{
-        //         .tag_type = u32,
-        //         .fields
-        //         .decls = &.{},
-        //         .is_exhaustive = true,
-        //     }
-        // });
-        // const Component = std.meta.FieldEnum(Components);
-        // const n_components = std.meta.fields(Component).len;
+        const Queue = std.meta.FieldEnum(Queues);
+        const n_queues = std.meta.fields(Queue).len;
+        fn QueueType(comptime c: Queue) type {
+            return @FieldType(Queues, @tagName(c));
+        }
 
-        // const Queue = blk: {
-        //     break :blk void;
-        // };
-        // const n_queues = std.meta.fields(Queue).len;
+        const Entity = u64;
 
-        // fn ComponentType(comptime c: Component) type {
-        //     return std.meta.fields(Components)[@intFromEnum(c)].type;
-        // }
-        // fn QueueType(comptime q: Queue) type {
-        //     return std.meta.fields(Queues)[@intFromEnum(q)].type;
-        // }
-
-        // const Entity = u64;
+        const Archetype = std.StaticBitSet(n_components);
 
         // const BlockPool = @import("block_pool.zig").BlockPool;
 
-        // const Page = struct {};
+        const Page = struct {
+            components: [n_components]usize,
+        };
 
         // pub const QueryInfo = struct {
         //     include_read: []const Component,
@@ -143,20 +44,66 @@ pub fn ECS(comptime info: ECSInfo) type {
         //     return struct {};
         // }
 
-        // const World = struct {};
+        const World = struct {
+            pages: std.ArrayList(*Page),
+            archetypes: std.ArrayList(Archetype),
+            // queues:
+        };
+
+        alloc: std.mem.Allocator, // used sparingly, mostly for large allocations inside BlockPool
+        id_counter: u64, // any number except 0 is fine
+        pool: BlockPool,
+
+        fn init(alloc: std.mem.Allocator) Self {
+            return .{
+                .alloc = alloc,
+                .id_counter = 1,
+                .pool = BlockPool.init(alloc),
+            };
+        }
+
+        fn deinit(ecs: *Self) void {
+            ecs.pool.deinit();
+            ecs.* = undefined;
+        }
+
+        fn newEntity(ecs: *Self) u64 {
+            // xorshift* with 2^64 - 1 period (0 is fixed point, and also the null entity)
+            var x = ecs.id_counter;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            ecs.id_counter = x;
+            return x *% 0x2545F4914F6CDD1D;
+        }
     };
 }
 
+const TestComponents = struct {
+    a: u32,
+    b: f32,
+};
+const TestQueues = struct {
+    c: i64,
+};
+
 pub fn main() !void {
-    const ecs = ECS(
-        Builder.begin
-            .addComponent(.a, u32)
-            .addComponent(.b, f32)
-            .addQueue(.c, i64)
-            .end(),
-    );
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    const ecstype = ECS(TestComponents, TestQueues);
+    var ecs = ecstype.init(alloc);
+    defer ecs.deinit();
 
     std.debug.print("{}\n", .{ecs});
-    ecs.foo(.a);
-    ecs.foo(.b);
+    std.debug.print("{s}\n", .{@typeName(ecstype.ComponentType(.b))});
+
+    const zero: u64 = 0;
+    std.debug.print("{}\n", .{std.hash.XxHash3.hash(0, std.mem.asBytes(&zero))});
+
+    std.debug.print("{}\n", .{ecs.newEntity()});
+    std.debug.print("{}\n", .{ecs.newEntity()});
+    std.debug.print("{}\n", .{ecs.newEntity()});
+    std.debug.print("{}\n", .{ecs.newEntity()});
 }
