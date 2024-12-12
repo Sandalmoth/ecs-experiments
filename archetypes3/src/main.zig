@@ -23,10 +23,24 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
         }
 
         const Entity = u64;
-
         const Archetype = std.StaticBitSet(n_components);
 
-        // const BlockPool = @import("block_pool.zig").BlockPool;
+        const EntityTemplate = gentype: {
+            // take the Components type and generate a variant where all fields are optionals
+            var fields: [n_components]std.builtin.Type.StructField = undefined;
+            @memcpy(&fields, std.meta.fields(Components));
+            for (0..fields.len) |i| {
+                fields[i].default_value = &@as(?fields[i].type, null);
+                fields[i].type = @Type(.{ .optional = .{ .child = fields[i].type } });
+            }
+            const typeinfo: std.builtin.Type = .{ .@"struct" = std.builtin.Type.Struct{
+                .layout = .auto,
+                .fields = &fields,
+                .decls = &.{},
+                .is_tuple = false,
+            } };
+            break :gentype @Type(typeinfo);
+        };
 
         const Page = struct {
             components: [n_components]usize,
@@ -45,9 +59,26 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
         // }
 
         const World = struct {
+            // TODO check the performance implications of linear archetype searches
+            // it should primarily impact create or insert/remove-component operations i think
+            ecs: *Self,
             pages: std.ArrayList(*Page),
             archetypes: std.ArrayList(Archetype),
-            // queues:
+            // insert_queues:
+            // remove_queues:
+            // create_queue
+            // destroy_queue
+
+            pub fn create(world: *World, template: EntityTemplate) Entity {
+                // TODO verify that data has no extra fields (sanity check/reduce bugs)
+                var archetype = Archetype.initEmpty();
+                inline for (std.meta.fields(EntityTemplate), 0..) |field, i| {
+                    if (@field(template, field.name) != null) archetype.set(i);
+                }
+                std.debug.print("{}\n", .{archetype});
+                std.debug.print("{s}\n", .{@typeName(@TypeOf(template))});
+                return world.ecs.newEntity();
+            }
         };
 
         alloc: std.mem.Allocator, // used sparingly, mostly for large allocations inside BlockPool
@@ -76,15 +107,33 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             ecs.id_counter = x;
             return x *% 0x2545F4914F6CDD1D;
         }
+
+        pub fn initWorld(ecs: *Self) World {
+            return .{
+                .ecs = ecs,
+                .pages = std.ArrayList(*Page).init(ecs.alloc),
+                .archetypes = std.ArrayList(Archetype).init(ecs.alloc),
+            };
+        }
+
+        pub fn deinitWorld(ecs: *Self, world: *World) void {
+            _ = ecs;
+            world.pages.deinit();
+            world.archetypes.deinit();
+        }
     };
 }
 
 const TestComponents = struct {
-    a: u32,
+    a: u128,
     b: f32,
 };
 const TestQueues = struct {
     c: i64,
+};
+
+const Foo = struct {
+    a: ?u32 = null,
 };
 
 pub fn main() !void {
@@ -106,4 +155,15 @@ pub fn main() !void {
     std.debug.print("{}\n", .{ecs.newEntity()});
     std.debug.print("{}\n", .{ecs.newEntity()});
     std.debug.print("{}\n", .{ecs.newEntity()});
+
+    var world = ecs.initWorld();
+    defer ecs.deinitWorld(&world);
+
+    _ = world.create(.{});
+    _ = world.create(.{ .a = 123 });
+    _ = world.create(.{ .b = 2.0 });
+    _ = world.create(.{ .a = 1337, .b = 33.4 });
+
+    std.debug.print("{}\n", .{std.meta.fieldInfo(ecstype.EntityTemplate, .a)});
+    std.debug.print("{}\n", .{std.meta.fieldInfo(ecstype.EntityTemplate, .b)});
 }
