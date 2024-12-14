@@ -89,6 +89,24 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
 
                 return page;
             }
+
+            fn append(page: *Page, entity: Entity, template: EntityTemplate) void {
+                std.debug.assert(page.len < page.capacity);
+                page.entities[page.len] = entity;
+                inline for (std.meta.fields(EntityTemplate), 0..) |field, i| {
+                    if (@field(template, field.name) != null) {
+                        const c: Component = @enumFromInt(i);
+                        page.component(c)[page.len] = @field(template, field.name).?;
+                    }
+                }
+                page.len += 1;
+            }
+
+            fn component(page: *Page, comptime c: Component) [*]ComponentType(c) {
+                const a = page.components[@intFromEnum(c)];
+                std.debug.assert(a != 0);
+                return @ptrFromInt(a);
+            }
         };
 
         // pub const QueryInfo = struct {
@@ -138,7 +156,8 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                     std.debug.print("{}\n", .{archetype});
                     std.debug.print("{s}\n", .{@typeName(@TypeOf(q.template))});
                     const page = try world.getPageMatch(archetype);
-                    _ = page;
+                    page.append(q.entity, q.template);
+                    std.debug.print("{}\n", .{page.*});
                 }
             }
 
