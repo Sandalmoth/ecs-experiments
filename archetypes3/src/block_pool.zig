@@ -16,7 +16,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
 
     return struct {
         const Pool = @This();
-        const block_size = config.block_size;
+        pub const block_size = config.block_size;
 
         const DummyMutex = struct {
             fn lock(_: *DummyMutex) void {}
@@ -80,8 +80,8 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
         pub fn create(pool: *Pool, comptime T: type) !*T {
             pool.mutex.lock();
             defer pool.mutex.unlock();
-            std.debug.assert(@sizeOf(T) <= block_size);
-            std.debug.assert(@alignOf(T) <= block_size);
+            comptime std.debug.assert(@sizeOf(T) <= block_size);
+            comptime std.debug.assert(@alignOf(T) <= block_size);
             if (pool.n_free == 0) try pool.expand();
             std.debug.assert(pool.segments.items.len > 0);
             var segment = pool.segments.remove();
