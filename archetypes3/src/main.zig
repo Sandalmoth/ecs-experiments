@@ -25,21 +25,63 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
         const Entity = u64;
         const Archetype = std.StaticBitSet(n_components);
 
-        const EntityTemplate = gentype: {
+        const EntityTemplate = blk: {
             // take the Components type and generate a variant where all fields are optionals
             var fields: [n_components]std.builtin.Type.StructField = undefined;
             @memcpy(&fields, std.meta.fields(Components));
             for (0..fields.len) |i| {
                 fields[i].default_value = &@as(?fields[i].type, null);
-                fields[i].type = @Type(.{ .optional = .{ .child = fields[i].type } });
+                // fields[i].type = @Type(.{ .optional = .{ .child = fields[i].type } });
+                fields[i].type = ?fields[i].type;
             }
-            const typeinfo: std.builtin.Type = .{ .@"struct" = std.builtin.Type.Struct{
+            const info: std.builtin.Type = .{ .@"struct" = std.builtin.Type.Struct{
                 .layout = .auto,
                 .fields = &fields,
                 .decls = &.{},
                 .is_tuple = false,
             } };
-            break :gentype @Type(typeinfo);
+            break :blk @Type(info);
+        };
+
+        const Bucket = struct {
+            const capacity = (BlockPool.block_size - 64) /
+                (@sizeOf(usize) + @sizeOf(?*Page) + @sizeOf(usize) + @sizeOf(u8));
+
+            len: usize,
+            pages: [capacity]?*Page,
+            indices: [capacity]usize,
+            fingerprints: [capacity]u8,
+
+            fn create(pool: *BlockPool) !*Bucket {
+                const bucket = try pool.create(Bucket);
+                bucket.len = 0;
+                bucket.pages = [_]?*Page{null} ** capacity;
+                return bucket;
+            }
+
+            fn full(bucket: Bucket) bool {
+                return bucket.len * 7 > capacity * 6; // TODO benchmark
+            }
+
+            fn insert(bucket: *Bucket, entity: Entity, page: *Page, index: usize) bool {
+                std.debug.assert(bucket.len < capacity);
+
+                const fingerprint: u8 = @intCast(entity >> 56);
+                var ix = (entity >> 32) % capacity;
+
+                while (bucket.pages[ix] != null) : (ix = (ix + 1) % capacity) {
+                    if (bucket.fingerprints[ix] == fingerprint) {
+                        const e = page.entities[bucket.indices[ix]];
+                        if (e == entity) return false;
+                    }
+                }
+
+                bucket.pages[ix] = page;
+                bucket.indices[ix] = index;
+                bucket.fingerprints[ix] = fingerprint;
+                bucket.len += 1;
+                return true;
+            }
         };
 
         const Page = struct {
@@ -90,7 +132,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 return page;
             }
 
-            fn append(page: *Page, entity: Entity, template: EntityTemplate) void {
+            fn append(page: *Page, entity: Entity, template: EntityTemplate) usize {
                 std.debug.assert(page.len < page.capacity);
                 page.entities[page.len] = entity;
                 inline for (std.meta.fields(EntityTemplate), 0..) |field, i| {
@@ -99,7 +141,9 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                         page.component(c)[page.len] = @field(template, field.name).?;
                     }
                 }
+                const index = page.len;
                 page.len += 1;
+                return index;
             }
 
             fn component(page: *Page, comptime c: Component) [*]ComponentType(c) {
@@ -131,8 +175,16 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             };
 
             ecs: *Self,
+
+            // pages hold the actual entity data, with one page per archetype
             pages: std.ArrayList(*Page),
             archetypes: std.ArrayList(Archetype),
+
+            // buckets hold a lookup table from an entity to it's location in a page
+            depth: usize = 0,
+            buckets: std.ArrayList(*Bucket), // extendible hashing
+            bucket_depths: std.ArrayList(usize),
+
             // insert_queues:
             // remove_queues:
             create_queue: std.ArrayList(CreateQueueEntry),
@@ -156,7 +208,8 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                     std.debug.print("{}\n", .{archetype});
                     std.debug.print("{s}\n", .{@typeName(@TypeOf(q.template))});
                     const page = try world.getPageMatch(archetype);
-                    page.append(q.entity, q.template);
+                    const index = page.append(q.entity, q.template);
+                    try world.addLookup(q.entity, page, index);
                     std.debug.print("{}\n", .{page.*});
                 }
             }
@@ -170,6 +223,26 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 try world.archetypes.append(archetype);
                 try world.pages.append(page);
                 return page;
+            }
+
+            fn addLookup(world: *World, entity: Entity, page: *Page, index: usize) !void {
+                if (world.buckets.items.len == 0) {
+                    const bucket = try Bucket.create(&world.ecs.pool);
+                    try world.buckets.append(bucket);
+                    try world.bucket_depths.append(0);
+                    world.depth = 0;
+                }
+
+                const slotmask = (@as(u64, 1) << @intCast(world.depth)) - 1;
+                const slot = entity & slotmask;
+                std.debug.assert(slot < world.buckets.items.len);
+                const bucket = world.buckets.items[slot];
+
+                const success = bucket.insert(entity, page, index);
+                std.debug.assert(success);
+
+                if (!bucket.full()) return;
+                @panic("TODO: expand hash");
             }
         };
 
@@ -205,6 +278,9 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 .ecs = ecs,
                 .pages = std.ArrayList(*Page).init(ecs.alloc),
                 .archetypes = std.ArrayList(Archetype).init(ecs.alloc),
+                .depth = 0,
+                .buckets = std.ArrayList(*Bucket).init(ecs.alloc),
+                .bucket_depths = std.ArrayList(usize).init(ecs.alloc),
                 .create_queue = std.ArrayList(World.CreateQueueEntry).init(ecs.alloc),
             };
         }
@@ -213,6 +289,8 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             _ = ecs;
             world.pages.deinit();
             world.archetypes.deinit();
+            world.buckets.deinit();
+            world.bucket_depths.deinit();
             world.create_queue.deinit();
         }
     };
