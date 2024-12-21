@@ -24,6 +24,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
 
         const Entity = u64;
         const Archetype = std.StaticBitSet(n_components);
+        const System = *const fn (QueryView) void;
 
         const EntityTemplate = blk: {
             // take the Components type and generate a variant where all fields are optionals
@@ -153,13 +154,52 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             }
         };
 
-        // pub const QueryInfo = struct {
-        //     include_read: []const Component,
-        //     include_modify: []const Component,
-        //     optional_read: []const Component,
-        //     optional_modify: []const Component,
-        //     exclude: []const Component,
-        // };
+        pub const RawQueryInfo = struct {
+            include_read: []const Component = &.{},
+            include_modify: []const Component = &.{},
+            optional_read: []const Component = &.{},
+            optional_modify: []const Component = &.{},
+            exclude: []const Component = &.{},
+        };
+        pub const QueryInfo = struct {
+            include_read: Archetype,
+            include_modify: Archetype,
+            optional_read: Archetype,
+            optional_modify: Archetype,
+            exclude: Archetype,
+
+            fn construct(raw: RawQueryInfo) QueryInfo {
+                var result = QueryInfo{
+                    .include_read = Archetype.initEmpty(),
+                    .include_modify = Archetype.initEmpty(),
+                    .optional_read = Archetype.initEmpty(),
+                    .optional_modify = Archetype.initEmpty(),
+                    .exclude = Archetype.initEmpty(),
+                };
+                for (raw.include_read) |c| result.include_read.set(@intFromEnum(c));
+                for (raw.include_modify) |c| result.include_modify.set(@intFromEnum(c));
+                for (raw.optional_read) |c| result.optional_read.set(@intFromEnum(c));
+                for (raw.optional_modify) |c| result.optional_modify.set(@intFromEnum(c));
+                for (raw.exclude) |c| result.exclude.set(@intFromEnum(c));
+                return result;
+            }
+
+            fn isSubset(this: QueryInfo, other: QueryInfo) bool {
+                _ = this;
+                _ = other;
+                return true;
+            }
+        };
+        pub const QueryView = struct {
+            world: *World,
+            info: QueryInfo = .{},
+
+            pub fn pageIterator(view: QueryView, q: QueryInfo) PageIterator {
+                std.debug.assert(q.isSubset(view.info));
+                return .{};
+            }
+            const PageIterator = struct {};
+        };
         // pub fn Query(comptime info: QueryInfo) type {
         //     _ = info;
         //     return struct {};
@@ -244,6 +284,30 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 if (!bucket.full()) return;
                 @panic("TODO: expand hash");
             }
+
+            fn eval(world: *World, system: anytype) void {
+                // _ = world;
+                // _ = system;
+                std.debug.print("{}\n", .{system.info});
+                system.exec(QueryView{
+                    .world = world,
+                    .info = system.info,
+                });
+
+                // const info = @typeInfo(@TypeOf(function));
+                // std.debug.print("{}\n", .{info.@"fn".calling_convention});
+                // std.debug.print("{}\n", .{info.@"fn".is_generic});
+                // std.debug.print("{}\n", .{info.@"fn".is_var_args});
+                // std.debug.print("{?}\n", .{info.@"fn".return_type});
+                // inline for (info.@"fn".params) |p| {
+                //     std.debug.print("{}\n", .{p});
+                // }
+
+                // inline for (info.@"fn".params) |param| {
+                //     const T = param.type.?;
+                //     std.debug.print("{}\n", .{T});
+                // }
+            }
         };
 
         alloc: std.mem.Allocator, // used sparingly, mostly for large allocations inside BlockPool
@@ -308,12 +372,36 @@ const Foo = struct {
     a: ?u32 = null,
 };
 
+const ecstype = ECS(TestComponents, TestQueues);
+// fn foo(
+//     q0: ecstype.Query(.{ .include_modify = &[_]ecstype.Component{.a} }),
+//     q1: ecstype.Query(.{ .include_read = &[_]ecstype.Component{.b} }),
+// ) void {
+//     _ = q0;
+//     _ = q1;
+// }
+
+fn bar(view: ecstype.QueryView) void {
+    const info: ecstype.QueryInfo = .{};
+    _ = info;
+    _ = view;
+}
+
+const FooSystem = struct {
+    info: ecstype.QueryInfo = .{},
+    fn exec(system: FooSystem, view: ecstype.QueryView) void {
+        _ = system;
+        // _ = view;
+        std.debug.print("hello system\n", .{});
+        _ = view.pageIterator(.{ .include_read = &[_]ecstype.Component{.a} });
+    }
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const ecstype = ECS(TestComponents, TestQueues);
     var ecs = ecstype.init(alloc);
     defer ecs.deinit();
 
@@ -340,4 +428,12 @@ pub fn main() !void {
 
     std.debug.print("{}\n", .{std.meta.fieldInfo(ecstype.EntityTemplate, .a)});
     std.debug.print("{}\n", .{std.meta.fieldInfo(ecstype.EntityTemplate, .b)});
+
+    world.eval(FooSystem{});
+    world.eval(struct {
+        info: ecstype.QueryInfo = .{},
+        fn exec(_: @This(), view: ecstype.QueryView) void {
+            _ = view;
+        }
+    }{});
 }
