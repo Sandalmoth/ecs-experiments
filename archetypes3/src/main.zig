@@ -44,6 +44,18 @@ comptime {
 
 const UntypedQueue = struct {
     // NOTE lock-free-ish possible?
+    // think about locking structure?
+    // basically, we should either have multiple simultaneous writers
+    // or one single reader
+    // (or should we allow multiple simultaneous readers too?)
+    // but reading and writing should never be allowed at the same time
+
+    // we could have some accessors/views that allow for just one or the other
+    // and then stick the locking in there for writing only
+
+    // also, maybe iterator shouldn't exist?
+    // or we should have a pageiterator & valueiterator like with the entities?
+
     const Page = struct {
         head: usize,
         tail: usize,
@@ -153,6 +165,8 @@ const UntypedQueue = struct {
     }
 
     fn iterator(queue: *UntypedQueue, comptime T: type) Iterator(T) {
+        queue.mutex.lock();
+        defer queue.mutex.unlock();
         return .{
             .page = queue.head,
             .cursor = if (queue.head) |head| head.head else undefined,
@@ -590,6 +604,13 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 template: EntityTemplate,
             };
 
+            fn InsertQueueEntry(comptime T: type) type {
+                return struct {
+                    entity: Entity,
+                    value: T,
+                };
+            }
+
             ecs: *Self,
 
             // pages hold the actual entity data, with one page per archetype
@@ -601,14 +622,14 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             buckets: std.ArrayList(*Bucket), // extendible hashing
             bucket_depths: std.ArrayList(usize),
 
-            // insert_queues:
-            // remove_queues:
-            create_queue: std.ArrayList(CreateQueueEntry),
-            destroy_queue: std.ArrayList(Entity),
+            create_queue: TypedQueue(CreateQueueEntry),
+            destroy_queue: TypedQueue(Entity),
+            insert_queues: [n_components]UntypedQueue,
+            remove_queues: [n_components]TypedQueue(Entity),
 
             pub fn queueCreate(world: *World, template: EntityTemplate) !Entity {
                 const entity = world.ecs.newEntity();
-                try world.create_queue.append(.{
+                try world.create_queue.push(.{
                     .entity = entity,
                     .template = template,
                 });
@@ -617,7 +638,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
 
             pub fn queueDestroy(world: *World, entity: Entity) !void {
                 std.debug.assert(entity != 0);
-                try world.destroy_queue.append(entity);
+                try world.destroy_queue.push(entity);
             }
 
             pub fn queueInsert(
@@ -642,7 +663,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             }
 
             pub fn processQueues(world: *World) !void {
-                for (world.create_queue.items) |q| {
+                while (world.create_queue.pop()) |q| {
                     var archetype = Archetype.initEmpty();
                     inline for (std.meta.fields(EntityTemplate), 0..) |field, i| {
                         if (@field(q.template, field.name) != null) archetype.set(i);
@@ -729,16 +750,23 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
         }
 
         pub fn initWorld(ecs: *Self) World {
-            return .{
+            var world = World{
                 .ecs = ecs,
                 .pages = std.ArrayList(*Page).init(ecs.alloc),
                 .archetypes = std.ArrayList(Archetype).init(ecs.alloc),
                 .depth = 0,
                 .buckets = std.ArrayList(*Bucket).init(ecs.alloc),
                 .bucket_depths = std.ArrayList(usize).init(ecs.alloc),
-                .create_queue = std.ArrayList(World.CreateQueueEntry).init(ecs.alloc),
-                .destroy_queue = std.ArrayList(Entity).init(ecs.alloc),
+                .create_queue = TypedQueue(World.CreateQueueEntry).init(&ecs.pool),
+                .destroy_queue = TypedQueue(Entity).init(&ecs.pool),
+                .insert_queues = undefined,
+                .remove_queues = undefined,
             };
+            for (0..n_components) |i| {
+                world.insert_queues[i] = UntypedQueue.init(&ecs.pool);
+                world.remove_queues[i] = TypedQueue(Entity).init(&ecs.pool);
+            }
+            return world;
         }
 
         pub fn deinitWorld(ecs: *Self, world: *World) void {
@@ -749,6 +777,11 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             world.bucket_depths.deinit();
             world.create_queue.deinit();
             world.destroy_queue.deinit();
+            for (0..n_components) |i| {
+                world.insert_queues[i].deinit();
+                world.remove_queues[i].deinit();
+            }
+            world.* = undefined;
         }
     };
 }
