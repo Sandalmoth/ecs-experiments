@@ -8,39 +8,14 @@ comptime {
     std.debug.assert(!builtin.single_threaded);
 }
 
-// const TypeErasedQueue = struct {
-//     // TODO multi-writer support
-//     // TODO segmentedlist design s.t. it can live in an arena without wasting memory
-//     // (if https://github.com/ziglang/zig/issues/20491 goes through we could use that?)
-//     alloc: std.mem.Allocator,
-//     len: usize,
-//     capacity: usize,
-//     bytes: ?[*]u8,
-
-//     fn init(alloc: std.mem.Allocator) TypeErasedQueue {
-//         return .{
-//             .alloc = alloc,
-//             .len = 0,
-//             .capacity = 0,
-//             .bytes = null,
-//         };
-//     }
-
-//     fn append(queue: *TypeErasedQueue, comptime T: type, value: T) !void {
-//         if (queue.bytes == null) {
-//             const min_capacity = 16;
-//             queue.bytes = (try queue.alloc.alloc(T, min_capacity)).ptr;
-//             queue.capacity = min_capacity;
-//         } else if (queue.len == queue.capacity) {
-//             const new_capacity = queue.capacity * 2;
-//             const new_bytes: [*]u8 = (try queue.alloc.alloc(T, new_capacity)).ptr;
-//             @memcpy(new_bytes, queue.bytes.?[0..queue.len]);
-//             queue.alloc.free(queue.bytes);
-//         }
-//         _ = queue;
-//         _ = value;
-//     }
-// };
+// generally with the view types, it would be nice if the query was comptime known
+// but partially comptime structs are currently not possible
+// though could be supported in the future https://github.com/ziglang/zig/issues/5675
+// alternatively, we could encode the query restrictions in the type
+// so that we could check compliance at compile time
+// though, it's not clear how to make the syntax work well
+// it is possible to let the world.eval read the query type from the scheduled functions argument
+// which is kinda nice
 
 const UntypedQueue = struct {
     // NOTE lock-free-ish possible?
@@ -131,6 +106,11 @@ const UntypedQueue = struct {
         queue.* = UntypedQueue.init(pool);
     }
 
+    fn empty(queue: *UntypedQueue) bool {
+        const head = queue.head orelse return true;
+        return head.head == head.tail;
+    }
+
     fn push(queue: *UntypedQueue, comptime T: type, value: T) !void {
         queue.mutex.lock();
         defer queue.mutex.unlock();
@@ -213,6 +193,10 @@ fn TypedQueue(comptime T: type) type {
 
         fn reset(queue: *Self) void {
             queue.untyped.reset();
+        }
+
+        fn empty(queue: *Self) bool {
+            return queue.untyped.empty();
         }
 
         fn push(queue: *Self, value: T) !void {
@@ -321,6 +305,10 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 return bucket.len * 7 > capacity * 6; // TODO benchmark
             }
 
+            fn empty(bucket: Bucket) bool {
+                return bucket.len == 0; // TODO consider early merging with threshold
+            }
+
             fn insert(bucket: *Bucket, entity: Entity, page: *Page, index: usize) bool {
                 std.debug.assert(bucket.len < capacity);
 
@@ -329,7 +317,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
 
                 while (bucket.pages[ix] != null) : (ix = (ix + 1) % capacity) {
                     if (bucket.fingerprints[ix] == fingerprint) {
-                        const e = page.entities[bucket.indices[ix]];
+                        const e = bucket.pages[ix].?.entities[bucket.indices[ix]];
                         if (e == entity) return false;
                     }
                 }
@@ -339,6 +327,83 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 bucket.fingerprints[ix] = fingerprint;
                 bucket.len += 1;
                 return true;
+            }
+
+            fn remove(bucket: *Bucket, entity: Entity) bool {
+                const fingerprint: u8 = @intCast(entity >> 56);
+                var ix = (entity >> 32) % capacity;
+
+                while (bucket.pages[ix] != null) : (ix = (ix + 1) % capacity) {
+                    if (bucket.fingerprints[ix] == fingerprint) {
+                        const e = bucket.pages[ix].?.entities[bucket.indices[ix]];
+                        if (e != entity) continue;
+
+                        // shuffle entries in bucket to preserve hashmap structure
+                        var ix_remove = ix;
+                        var ix_shift = ix_remove;
+                        var dist: usize = 1;
+                        while (true) {
+                            ix_shift = (ix_shift + 1) % capacity;
+                            const page_shift = bucket.pages[ix_shift] orelse {
+                                bucket.pages[ix_remove] = null;
+                                bucket.len -= 1;
+                                return true;
+                            };
+                            const entity_shift = page_shift.entities[bucket.indices[ix_shift]];
+                            const key_dist = (ix_shift -% entity_shift) % capacity;
+                            if (key_dist >= dist) {
+                                bucket.pages[ix_remove] = bucket.pages[ix_shift];
+                                bucket.indices[ix_remove] = bucket.indices[ix_shift];
+                                bucket.fingerprints[ix_remove] = bucket.fingerprints[ix_shift];
+                                ix_remove = ix_shift;
+                                dist = 1;
+                            } else {
+                                dist += 1;
+                            }
+                        }
+                    }
+                }
+
+                return false;
+            }
+
+            fn update(bucket: *Bucket, entity: Entity, page: *Page, index: usize) bool {
+                std.debug.assert(bucket.len < capacity);
+
+                const fingerprint: u8 = @intCast(entity >> 56);
+                var ix = (entity >> 32) % capacity;
+
+                while (bucket.pages[ix] != null) : (ix = (ix + 1) % capacity) {
+                    if (bucket.fingerprints[ix] == fingerprint) {
+                        const e = bucket.pages[ix].?.entities[bucket.indices[ix]];
+                        if (e == entity) {
+                            bucket.pages[ix] = page;
+                            bucket.indices[ix] = index;
+                            bucket.fingerprints[ix] = fingerprint;
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            }
+
+            fn get(bucket: Bucket, entity: Entity) ?EntityView {
+                const fingerprint: u8 = @intCast(entity >> 56);
+                var ix = (entity >> 32) % capacity;
+
+                while (bucket.pages[ix] != null) : (ix = (ix + 1) % capacity) {
+                    if (bucket.fingerprints[ix] == fingerprint) {
+                        const e = bucket.pages[ix].?.entities[bucket.indices[ix]];
+                        if (e == entity) return .{
+                            .page = bucket.pages[ix].?,
+                            .index = bucket.indices[ix],
+                            .query = undefined,
+                        };
+                    }
+                }
+
+                return null;
             }
         };
 
@@ -361,7 +426,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                         sz += @sizeOf(ComponentType(c));
                     }
                 }
-                std.debug.print("sz {}\n", .{sz});
+                // std.debug.print("sz {}\n", .{sz});
 
                 page.capacity = page.data.len / sz;
                 while (true) {
@@ -385,7 +450,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                     std.debug.print("overestimate for archetype {}\n", .{archetype});
                 }
 
-                std.debug.print("{any} {}\n", .{ page.components, page.capacity });
+                // std.debug.print("{any} {}\n", .{ page.components, page.capacity });
 
                 return page;
             }
@@ -402,6 +467,28 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 const index = page.len;
                 page.len += 1;
                 return index;
+            }
+
+            /// returns the entity that was relocated (or null entity if no relocation)
+            fn erase(page: *Page, index: usize) Entity {
+                const end = page.len - 1;
+                if (index == end) {
+                    // easy special case with no swap
+                    page.len -= 1;
+                    return 0;
+                }
+
+                const moved = page.entities[end];
+                page.entities[index] = page.entities[end];
+                inline for (page.components, 0..) |a, i| {
+                    if (a != 0) {
+                        const c: Component = @enumFromInt(i);
+                        const data = page.component(c);
+                        data[index] = data[end];
+                    }
+                }
+                page.len -= 1;
+                return moved;
             }
 
             fn component(page: *Page, comptime c: Component) [*]ComponentType(c) {
@@ -451,7 +538,26 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 return view.page.component(component)[view.index];
             }
 
-            // getOptional
+            fn getOptional(
+                view: EntityView,
+                comptime component: Component,
+            ) ?ComponentType(component) {
+                const includes = view.query.include_read
+                    .unionWith(view.query.include_read_write);
+                std.debug.assert(includes.isSet(@intFromEnum(component)));
+                if (view.page.components[@intFromEnum(component)] == 0) return null;
+                return view.page.component(component)[view.index];
+            }
+
+            fn getTemplate(view: EntityView) EntityTemplate {
+                var template = EntityTemplate{};
+                inline for (0..n_components) |i| {
+                    const c: Component = @enumFromInt(i);
+                    @field(template, @tagName(c)) = view.getOptional(c);
+                }
+                return template;
+            }
+
             // getPtr
             // getPtrOptional
         };
@@ -481,8 +587,8 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
 
             pub fn pageIterator(view: ScheduleView, raw_query: RawQueryInfo) PageIterator {
                 const query = QueryInfo.init(raw_query);
-                std.debug.print("{}\n", .{view.schedule});
-                std.debug.print("{}\n", .{query});
+                // std.debug.print("{}\n", .{view.schedule});
+                // std.debug.print("{}\n", .{query});
                 std.debug.assert(query.isValid(view.schedule));
                 // const qi = QueryInfo.init(q);
                 // std.debug.assert(qi.isSubset(view.info));
@@ -514,7 +620,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 }
 
                 fn isValid(archetype: Archetype, includes: Archetype, excludes: Archetype) bool {
-                    std.debug.print("{} {} {}\n", .{ archetype, includes, excludes });
+                    // std.debug.print("{} {} {}\n", .{ archetype, includes, excludes });
                     return includes.subsetOf(archetype) and
                         excludes.intersectWith(archetype).count() == 0;
                 }
@@ -534,6 +640,14 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             optional_read: Archetype,
             optional_read_write: Archetype,
             exclude: Archetype,
+
+            const any = QueryInfo{
+                .include_read = Archetype.initEmpty(),
+                .include_read_write = Archetype.initFull(),
+                .optional_read = Archetype.initEmpty(),
+                .optional_read_write = Archetype.initEmpty(),
+                .exclude = Archetype.initEmpty(),
+            };
 
             fn init(raw: RawQueryInfo) QueryInfo {
                 var result = QueryInfo{
@@ -574,26 +688,6 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                     optional_read and optional_read_write;
             }
         };
-        const QueryView = struct {
-            page: *Page,
-            query: QueryInfo,
-        };
-
-        // pub const QueryView = struct {
-        //     world: *World,
-        //     info: QueryInfo,
-
-        //     pub fn pageIterator(view: QueryView, q: RawQueryInfo) PageIterator {
-        //         const qi = QueryInfo.init(q);
-        //         std.debug.assert(qi.isSubset(view.info));
-        //         return .{};
-        //     }
-        //     const PageIterator = struct {};
-        // };
-        // pub fn Query(comptime info: QueryInfo) type {
-        //     _ = info;
-        //     return struct {};
-        // }
 
         const World = struct {
             // TODO check the performance implications of linear archetype searches
@@ -626,6 +720,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             destroy_queue: TypedQueue(Entity),
             insert_queues: [n_components]UntypedQueue,
             remove_queues: [n_components]TypedQueue(Entity),
+            queues: [n_queues]UntypedQueue,
 
             pub fn queueCreate(world: *World, template: EntityTemplate) !Entity {
                 const entity = world.ecs.newEntity();
@@ -634,6 +729,13 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                     .template = template,
                 });
                 return entity;
+            }
+
+            pub fn queueCreate2(world: *World, entity: Entity, template: EntityTemplate) !void {
+                try world.create_queue.push(.{
+                    .entity = entity,
+                    .template = template,
+                });
             }
 
             pub fn queueDestroy(world: *World, entity: Entity) !void {
@@ -648,8 +750,10 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 value: ComponentType(component),
             ) !void {
                 std.debug.assert(entity != 0);
-                _ = world;
-                _ = value;
+                try world.insert_queues[@intFromEnum(component)].push(
+                    InsertQueueEntry(ComponentType(component)),
+                    .{ .entity = entity, .value = value },
+                );
             }
 
             pub fn queueRemove(
@@ -658,22 +762,115 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 comptime component: Component,
             ) !void {
                 std.debug.assert(entity != 0);
-                _ = world;
-                _ = component;
+                try world.remove_queues[@intFromEnum(component)].push(entity);
             }
 
-            pub fn processQueues(world: *World) !void {
+            fn processCreateQueue(world: *World) !void {
                 while (world.create_queue.pop()) |q| {
                     var archetype = Archetype.initEmpty();
                     inline for (std.meta.fields(EntityTemplate), 0..) |field, i| {
                         if (@field(q.template, field.name) != null) archetype.set(i);
                     }
-                    std.debug.print("{}\n", .{archetype});
-                    std.debug.print("{s}\n", .{@typeName(@TypeOf(q.template))});
+                    // std.debug.print("{}\n", .{archetype});
+                    // std.debug.print("{s}\n", .{@typeName(@TypeOf(q.template))});
                     const page = try world.getPageMatch(archetype);
                     const index = page.append(q.entity, q.template);
                     try world.addLookup(q.entity, page, index);
-                    std.debug.print("{}\n", .{page.*});
+                    // std.debug.print("{}\n", .{page.*});
+                }
+            }
+
+            fn processDestroyQueue(world: *World) void {
+                while (world.destroy_queue.pop()) |e| {
+                    const entity = world.lookup(e) orelse continue;
+                    world.removeLookup(e);
+                    const moved = entity.page.erase(entity.index);
+                    if (moved != 0) world.updateLookup(moved, entity.page, entity.index);
+                }
+            }
+
+            pub fn processQueues(world: *World) !void {
+                // NOTE we could cancel out creates with immediate destroys
+                // and save some processing in those cases, but it's unclear if that's worth it
+                try world.processCreateQueue();
+                world.processDestroyQueue();
+
+                inline for (0..n_components) |i| {
+                    // update components on entities by destroying and recreating at a batch level
+                    // alternative would be to update per modification which may be more efficent
+                    // as it causes less edits to the lookup table
+                    // although, batching is often faster so this method might be more predictable
+
+                    std.debug.assert(world.create_queue.empty());
+                    std.debug.assert(world.destroy_queue.empty());
+                    const c: Component = @enumFromInt(i);
+                    const C = ComponentType(c);
+                    while (world.insert_queues[i].pop(InsertQueueEntry(C))) |q| {
+                        const entity = world.lookup(q.entity) orelse continue;
+                        if (entity.page.components[i] != 0) {
+                            std.debug.print("entity has component, ignoring insert\n", .{});
+                            continue;
+                        }
+                        var template = entity.getTemplate();
+                        @field(template, @tagName(c)) = q.value;
+                        try world.queueCreate2(q.entity, template);
+                        try world.queueDestroy(q.entity);
+                    }
+                    world.processDestroyQueue();
+                    try world.processCreateQueue();
+
+                    std.debug.assert(world.create_queue.empty());
+                    std.debug.assert(world.destroy_queue.empty());
+                    while (world.remove_queues[i].pop()) |e| {
+                        const entity = world.lookup(e) orelse continue;
+                        if (entity.page.components[i] == 0) {
+                            std.debug.print("entity lacks component, ignoring remove\n", .{});
+                            continue;
+                        }
+                        var template = entity.getTemplate();
+                        @field(template, @tagName(c)) = null;
+                        try world.queueCreate2(e, template);
+                        try world.queueDestroy(e);
+                    }
+                    world.processDestroyQueue();
+                    try world.processCreateQueue();
+
+                    // while (world.insert_queues[i].pop(InsertQueueEntry(C))) |q| {
+                    //     const entity = world.lookup(q.entity) orelse continue;
+                    //     if (entity.page.components[i] != 0) {
+                    //         std.debug.print("entity has component, ignoring insert\n", .{});
+                    //         continue;
+                    //     }
+                    //     var archetype = Archetype.initEmpty();
+                    //     archetype.set(i);
+                    //     for (entity.page.components, 0..) |a, j| {
+                    //         if (a != 0) archetype.set(j);
+                    //     }
+                    //     const page = try world.getPageMatch(archetype);
+                    //     var template = entity.getTemplate();
+                    //     @field(template, @tagName(c)) = q.value;
+                    //     const index = page.append(q.entity, q.template);
+                    //     const moved = entity.page.erase(entity.index);
+                    //     world.updateLookup(q.entity, page, index);
+                    //     if (moved != 0) world.updateLookup(moved, entity.page, entity.index);
+                    // }
+
+                    // while (world.remove_queues[i].pop()) |e| {
+                    //     _ = e;
+                    // }
+                }
+
+                // cleanup unused archetypes
+                var ix: usize = 0;
+                while (ix < world.pages.items.len) {
+                    if (world.pages.items[ix].len > 0) {
+                        ix += 1;
+                        continue;
+                    }
+                    std.debug.assert(world.pages.items.len == world.archetypes.items.len);
+                    const page = world.pages.swapRemove(ix);
+                    _ = world.archetypes.swapRemove(ix);
+                    world.ecs.pool.destroy(page);
                 }
             }
 
@@ -708,13 +905,42 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 @panic("TODO: expand hash");
             }
 
+            fn removeLookup(world: *World, entity: Entity) void {
+                // TODO defensive programming
+                const slotmask = (@as(u64, 1) << @intCast(world.depth)) - 1;
+                const slot = entity & slotmask;
+                std.debug.assert(slot < world.buckets.items.len);
+                const bucket = world.buckets.items[slot];
+
+                const success = bucket.remove(entity);
+                std.debug.assert(success);
+
+                if (!bucket.empty()) return;
+                @panic("TODO: shrink hash");
+            }
+
+            fn updateLookup(world: *World, entity: Entity, page: *Page, index: usize) void {
+                const slotmask = (@as(u64, 1) << @intCast(world.depth)) - 1;
+                const slot = entity & slotmask;
+                std.debug.assert(slot < world.buckets.items.len);
+                const bucket = world.buckets.items[slot];
+
+                const success = bucket.update(entity, page, index);
+                std.debug.assert(success);
+            }
+
             fn lookup(world: *World, entity: Entity) ?EntityView {
-                _ = world;
-                _ = entity;
+                const slotmask = (@as(u64, 1) << @intCast(world.depth)) - 1;
+                const slot = entity & slotmask;
+                std.debug.assert(slot < world.buckets.items.len);
+                const bucket = world.buckets.items[slot];
+                var result = bucket.get(entity) orelse return null;
+                result.query = .any;
+                return result;
             }
 
             fn eval(world: *World, schedule: ScheduleInfo, system: System) void {
-                std.debug.print("{}\n", .{schedule});
+                // std.debug.print("{}\n", .{schedule});
                 system(ScheduleView{
                     .world = world,
                     .schedule = schedule,
@@ -761,10 +987,14 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 .destroy_queue = TypedQueue(Entity).init(&ecs.pool),
                 .insert_queues = undefined,
                 .remove_queues = undefined,
+                .queues = undefined,
             };
             for (0..n_components) |i| {
                 world.insert_queues[i] = UntypedQueue.init(&ecs.pool);
                 world.remove_queues[i] = TypedQueue(Entity).init(&ecs.pool);
+            }
+            for (0..n_queues) |i| {
+                world.queues[i] = UntypedQueue.init(&ecs.pool);
             }
             return world;
         }
@@ -780,6 +1010,9 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             for (0..n_components) |i| {
                 world.insert_queues[i].deinit();
                 world.remove_queues[i].deinit();
+            }
+            for (0..n_queues) |i| {
+                world.queues[i].deinit();
             }
             world.* = undefined;
         }
@@ -838,14 +1071,25 @@ pub fn main() !void {
     defer ecs.deinitWorld(&world);
 
     _ = try world.queueCreate(.{});
-    _ = try world.queueCreate(.{ .a = 123 });
-    _ = try world.queueCreate(.{ .b = 2.0 });
-    _ = try world.queueCreate(.{ .a = 1337, .b = 33.4 });
+    const e0 = try world.queueCreate(.{ .a = 123 });
+    const e1 = try world.queueCreate(.{ .b = 2.0 });
+    const e2 = try world.queueCreate(.{ .a = 1337, .b = 33.4 });
     _ = try world.queueCreate(.{ .b = 3.0 });
     try world.processQueues();
 
     std.debug.print("{}\n", .{std.meta.fieldInfo(ecstype.EntityTemplate, .a)});
     std.debug.print("{}\n", .{std.meta.fieldInfo(ecstype.EntityTemplate, .b)});
+
+    world.eval(foobar_info, foobar);
+
+    try world.queueDestroy(e0);
+    try world.processQueues();
+
+    world.eval(foobar_info, foobar);
+
+    try world.queueInsert(e1, .a, 999);
+    try world.queueRemove(e2, .a);
+    try world.processQueues();
 
     world.eval(foobar_info, foobar);
 }
