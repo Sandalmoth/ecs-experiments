@@ -12,7 +12,7 @@ pub fn main() !void {
 fn bench5b(alloc: std.mem.Allocator) !void {
     // a more ecs-like test where one component is iterated and compared with lookups in the other
     var acc: u64 = 0;
-    var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
+    var rng = std.Random.Xoshiro256.init(@intCast(std.time.microTimestamp()));
     var rand = rng.random();
 
     std.debug.print("len_1\tlen_2\tlen_3\tins\titer_1\titer_12\titer_123\n", .{});

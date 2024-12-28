@@ -446,7 +446,7 @@ pub fn main() !void {
 
     s.debugPrint();
 
-    var rng = std.rand.Xoshiro256.init(@intCast(std.time.microTimestamp()));
+    var rng = std.Random.Xoshiro256.init(@intCast(std.time.microTimestamp()));
 
     const n = 32;
     for (0..n) |_| {

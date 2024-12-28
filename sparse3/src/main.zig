@@ -357,7 +357,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    var rng = std.rand.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+    var rng = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
     const rand = rng.random();
 
     var s = try Storage.init(u32, alloc);
