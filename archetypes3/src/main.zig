@@ -251,23 +251,23 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
     return struct {
         const Self = @This();
 
-        const Component = std.meta.FieldEnum(Components);
+        pub const Component = std.meta.FieldEnum(Components);
         const n_components = std.meta.fields(Component).len;
         fn ComponentType(comptime c: Component) type {
             return @FieldType(Components, @tagName(c));
         }
 
-        const Queue = std.meta.FieldEnum(Queues);
+        pub const Queue = std.meta.FieldEnum(Queues);
         const n_queues = std.meta.fields(Queue).len;
         fn QueueType(comptime c: Queue) type {
             return @FieldType(Queues, @tagName(c));
         }
 
-        const Entity = u64;
+        pub const Entity = u64;
         const Archetype = std.StaticBitSet(n_components);
         const System = *const fn (ScheduleView) void;
 
-        const EntityTemplate = blk: {
+        pub const EntityTemplate = blk: {
             // take the Components type and generate a variant where all fields are optionals
             var fields: [n_components]std.builtin.Type.StructField = undefined;
             @memcpy(&fields, std.meta.fields(Components));
@@ -501,7 +501,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             page: *Page,
             query: QueryInfo,
 
-            fn entityIterator(view: PageView) EntityIterator {
+            pub fn entityIterator(view: PageView) EntityIterator {
                 return .{
                     .page_view = view,
                     .cursor = 0,
@@ -531,14 +531,14 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             index: usize,
             query: QueryInfo,
 
-            fn get(view: EntityView, comptime component: Component) ComponentType(component) {
+            pub fn get(view: EntityView, comptime component: Component) ComponentType(component) {
                 const includes = view.query.include_read
                     .unionWith(view.query.include_read_write);
                 std.debug.assert(includes.isSet(@intFromEnum(component)));
                 return view.page.component(component)[view.index];
             }
 
-            fn getOptional(
+            pub fn getOptional(
                 view: EntityView,
                 comptime component: Component,
             ) ?ComponentType(component) {
@@ -547,6 +547,13 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 std.debug.assert(includes.isSet(@intFromEnum(component)));
                 if (view.page.components[@intFromEnum(component)] == 0) return null;
                 return view.page.component(component)[view.index];
+            }
+
+            pub fn getPtr(view: EntityView, comptime component: Component) *ComponentType(component) {
+                const includes = view.query.include_read
+                    .unionWith(view.query.include_read_write);
+                std.debug.assert(includes.isSet(@intFromEnum(component)));
+                return &view.page.component(component)[view.index];
             }
 
             fn getTemplate(view: EntityView) EntityTemplate {
@@ -570,7 +577,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             read: Archetype,
             read_write: Archetype,
 
-            fn init(raw: RawScheduleInfo) ScheduleInfo {
+            pub fn init(raw: RawScheduleInfo) ScheduleInfo {
                 var result = ScheduleInfo{
                     .read = Archetype.initEmpty(),
                     .read_write = Archetype.initEmpty(),
@@ -603,7 +610,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 query: QueryInfo,
                 cursor: usize,
 
-                fn next(iterator: *PageIterator) ?PageView {
+                pub fn next(iterator: *PageIterator) ?PageView {
                     const includes = iterator.query.include_read
                         .unionWith(iterator.query.include_read_write);
                     const excludes = iterator.query.exclude;
@@ -798,8 +805,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 inline for (0..n_components) |i| {
                     // update components on entities by destroying and recreating at a batch level
                     // alternative would be to update per modification which may be more efficent
-                    // as it causes less edits to the lookup table
-                    // although, batching is often faster so this method might be more predictable
+                    // as it causes less edits to the lookup table, and lower memory use overall
 
                     std.debug.assert(world.create_queue.empty());
                     std.debug.assert(world.destroy_queue.empty());
@@ -835,6 +841,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                     world.processDestroyQueue();
                     try world.processCreateQueue();
 
+                    // other version would look something like this
                     // while (world.insert_queues[i].pop(InsertQueueEntry(C))) |q| {
                     //     const entity = world.lookup(q.entity) orelse continue;
                     //     if (entity.page.components[i] != 0) {
@@ -854,9 +861,8 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                     //     world.updateLookup(q.entity, page, index);
                     //     if (moved != 0) world.updateLookup(moved, entity.page, entity.index);
                     // }
-
                     // while (world.remove_queues[i].pop()) |e| {
-                    //     _ = e;
+                    //     _ = e; // todo
                     // }
                 }
 
@@ -902,7 +908,33 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 std.debug.assert(success);
 
                 if (!bucket.full()) return;
-                @panic("TODO: expand hash");
+                if (world.bucket_depths.items[slot] == world.depth) {
+                    // index expansion
+                    // std.debug.print("index expansion\n", .{});
+                    try world.buckets.ensureUnusedCapacity(world.buckets.items.len);
+                    try world.bucket_depths.ensureUnusedCapacity(world.bucket_depths.items.len);
+                    world.buckets.appendSliceAssumeCapacity(world.buckets.items);
+                    world.bucket_depths.appendSliceAssumeCapacity(world.bucket_depths.items);
+                    world.depth += 1;
+                }
+                const slotmask1 = (@as(u64, 1) << @intCast(world.bucket_depths.items[slot])) - 1;
+                const slot1 = entity & slotmask1;
+                const slot2 = slot1 + (@as(u64, 1) << @intCast(world.depth - 1));
+                // std.debug.print("{} {}\n", .{ world.depth, world.bucket_depths.items[slot] });
+                // std.debug.print("{} {} {}\n", .{ slot, slot1, slot2 });
+                world.buckets.items[slot1] = try Bucket.create(&world.ecs.pool);
+                world.bucket_depths.items[slot1] += 1;
+                world.buckets.items[slot2] = try Bucket.create(&world.ecs.pool);
+                world.bucket_depths.items[slot2] += 1;
+                for (0..Bucket.capacity) |i| {
+                    const split_page = bucket.pages[i] orelse continue;
+                    const split_entity = split_page.entities[bucket.indices[i]];
+                    // might be faster to avoid the recursive call
+                    // however, this is safe against a degenerate hash distribution
+                    // as it will trigger further splits if (somehow) needed
+                    try world.addLookup(split_entity, split_page, bucket.indices[i]);
+                }
+                world.ecs.pool.destroy(bucket);
             }
 
             fn removeLookup(world: *World, entity: Entity) void {
@@ -939,7 +971,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
                 return result;
             }
 
-            fn eval(world: *World, schedule: ScheduleInfo, system: System) void {
+            pub fn eval(world: *World, schedule: ScheduleInfo, system: System) void {
                 // std.debug.print("{}\n", .{schedule});
                 system(ScheduleView{
                     .world = world,
@@ -952,7 +984,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
         id_counter: u64, // any number except 0 is fine
         pool: BlockPool,
 
-        fn init(alloc: std.mem.Allocator) Self {
+        pub fn init(alloc: std.mem.Allocator) Self {
             return .{
                 .alloc = alloc,
                 .id_counter = 1,
@@ -960,7 +992,7 @@ pub fn ECS(comptime Components: type, comptime Queues: type) type {
             };
         }
 
-        fn deinit(ecs: *Self) void {
+        pub fn deinit(ecs: *Self) void {
             ecs.pool.deinit();
             ecs.* = undefined;
         }
