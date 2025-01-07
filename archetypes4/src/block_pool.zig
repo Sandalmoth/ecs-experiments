@@ -56,6 +56,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
         n_free: usize,
         mutex: if (single_threaded) DummyMutex else std.Thread.Mutex,
 
+        /// gpa or calloc recommended as the backing allocator
         pub fn init(alloc: std.mem.Allocator) Pool {
             return .{
                 .alloc = alloc,

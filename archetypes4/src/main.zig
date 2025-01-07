@@ -17,6 +17,7 @@ const BlockPool = @import("block_pool.zig").BlockPool;
 //     std.debug.assert(!builtin.single_threaded);
 // }
 
+/// either multiple threads writing to queue, or single thread reading/writing
 const UntypedQueue = struct {
     // NOTE lock-free-ish possible?
     // think about locking structure?
@@ -80,7 +81,7 @@ const UntypedQueue = struct {
     capacity: usize,
     head: ?*Page,
     tail: ?*Page,
-    mutex: std.Thread.Mutex,
+    mutex: Mutex,
 
     fn init(pool: *BlockPool) UntypedQueue {
         return .{
@@ -89,7 +90,7 @@ const UntypedQueue = struct {
             .capacity = 0,
             .head = null,
             .tail = null,
-            .mutex = std.Thread.Mutex{},
+            .mutex = Mutex{},
         };
     }
 
@@ -293,99 +294,12 @@ test "queue" {
     }
 }
 
-fn BlockList(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        const Page = struct {
-            const value_capacity = (BlockPool.block_size - 64) / @sizeOf(T) - 1;
-            const child_capacity = (BlockPool.block_size - 64) / @sizeOf(?*Page) - 1;
-            len: usize,
-            _values: usize,
-            _children: usize,
-            bytes: [BlockPool.block_size - 64]u8,
-
-            fn create(pool: *BlockPool) !*Page {
-                const page = try pool.create(Page);
-                const base = @intFromPtr(&page.bytes[0]);
-                page._values = std.mem.alignForward(usize, base, @alignOf(T));
-                page._children = std.mem.alignForward(usize, base, @alignOf(?*Page));
-                return page;
-            }
-
-            fn values(page: *Page) [*]T {
-                return @ptrFromInt(page._values);
-            }
-
-            fn children(page: *Page) [*]?*Page {
-                return @ptrFromInt(page._children);
-            }
-        };
-
-        pool: *BlockPool,
-        root: ?*Page,
-        len: usize,
-        capacity: usize,
-        depth: usize,
-
-        fn init(pool: BlockPool) Self {
-            return .{
-                .pool = pool,
-                .root = null,
-                .len = 0,
-                .depth = 0,
-            };
-        }
-
-        fn ensureCapacityImpl(list: *Self, n: usize, walk: *Page, depth: usize) !void {
-            // recursive addition of new pages
-            if (depth == 0) {
-                list.capacity += Page.value_capacity;
-            }
-            while (list.capacity < n) {
-                if (walk.len == Page.child_capacity) return;
-                walk.children()[walk.len] = try Page.create(list.pool);
-                walk.len += 1;
-                ensureCapacityImpl(n, walk.children()[walk.len - 1].?, depth - 1);
-            }
-        }
-        fn ensureCapacity(list: *Self, n: usize) !void {
-            if (list.capacity >= n) return;
-            if (list.root == null) {
-                list.root = try Page.create(list.pool);
-                std.debug.assert(list.depth == 0);
-            } else if (list.depth == 0) {
-                // we only have a leaf page, add a node above it
-                const page = try Page.create(list.pool);
-                page.children[0] = list.root;
-                list.root = page;
-                page.len = 1;
-                list.depth += 1;
-            }
-            list.capacity += Page.value_capacity;
-
-            while (true) {
-                list.ensureCapacityImpl(n, list.root, list.depth);
-                if (list.capacity >= n) return;
-                // we need to expand at the root level to make room
-                const page = try Page.create(list.pool);
-                page.children[0] = list.root;
-                list.root = page;
-                page.len = 1;
-                list.depth += 1;
-            }
-        }
-    };
-}
-
-test "blocklist" {}
-
 pub const Key = enum(u64) {
     nil = 0,
     _,
 
     fn fingerprint(key: Key) u8 {
-        return @intFromEnum(key) >> 56;
+        return @truncate(@intFromEnum(key) >> 28);
     }
 
     fn indexSlot(key: Key, depth: usize) usize {
@@ -394,15 +308,15 @@ pub const Key = enum(u64) {
     }
 
     fn bucketSlot(key: Key, comptime capacity: usize) usize {
-        return (@intFromEnum(key) >> 32) % capacity;
+        return (@intFromEnum(key) >> 36) % capacity;
     }
 };
 
-pub const KeyGen = struct {
+pub const KeyGenerator = struct {
     counter: u64 = 1,
-    mutex: Mutex,
+    mutex: Mutex = Mutex{},
 
-    fn next(keygen: *KeyGen) Key {
+    fn next(keygen: *KeyGenerator) Key {
         // xorshift* with 2^64 - 1 period (0 is fixed point, and also the null entity)
         keygen.mutex.lock();
         defer keygen.mutex.unlock();
@@ -417,6 +331,8 @@ pub const KeyGen = struct {
 
 pub fn World(comptime ComponentSpec: type, comptime QueueSpec: type) type {
     return struct {
+        const Self = @This();
+
         pub const Component = std.meta.FieldEnum(ComponentSpec);
         const n_components = std.meta.fields(Component).len;
         fn ComponentType(comptime c: Component) type {
@@ -429,8 +345,187 @@ pub fn World(comptime ComponentSpec: type, comptime QueueSpec: type) type {
             return @FieldType(QueueSpec, @tagName(c));
         }
 
+        const CreateQueueEntry = struct {
+            key: Key,
+            template: Template,
+        };
+        fn InsertQueueEntry(comptime T: type) type {
+            return struct {
+                key: Key,
+                value: T,
+            };
+        }
+
         const ComponentSet = std.StaticBitSet(n_components);
         const QueueSet = std.StaticBitSet(n_queues);
+
+        const Bucket = struct {
+            // buckets hold a lookup table from an entity to it's location in a page
+            const capacity = std.math.floorPowerOfTwo(
+                usize,
+                (BlockPool.block_size - @sizeOf(usize)) /
+                    (@sizeOf(?*Page) + @sizeOf(usize) + @sizeOf(u8)),
+            ); // power of two for speed (TODO benchmark prime size)
+
+            len: usize,
+            pages: [capacity]?*Page,
+            indices: [capacity]usize,
+            fingerprints: [capacity]u8,
+
+            fn create(pool: *BlockPool) !*Bucket {
+                const bucket = try pool.create(Bucket);
+                bucket.len = 0;
+                bucket.pages = [_]?*Page{null} ** capacity;
+                return bucket;
+            }
+
+            fn full(bucket: Bucket) bool {
+                return bucket.len * 9 > capacity * 8; // TODO benchmark percentage
+            }
+
+            fn empty(bucket: Bucket) bool {
+                return bucket.len * 9 < capacity; // TODO benchmark percentage
+            }
+
+            fn insert(bucket: *Bucket, key: Key, page: *Page, index: usize) bool {
+                std.debug.assert(bucket.len < capacity);
+                const fingerprint = key.fingerprint();
+                var ix = key.bucketSlot();
+
+                while (bucket.pages[ix] != null) : (ix = (ix + 1) % capacity) {
+                    if (bucket.fingerprints[ix] == fingerprint) {
+                        const e = bucket.pages[ix].?.entities[bucket.indices[ix]];
+                        if (e == key) return false;
+                    }
+                }
+
+                bucket.pages[ix] = page;
+                bucket.indices[ix] = index;
+                bucket.fingerprints[ix] = fingerprint;
+                bucket.len += 1;
+                return true;
+            }
+
+            fn remove(bucket: *Bucket, key: Key) bool {
+                const fingerprint = key.fingerprint();
+                var ix = key.bucketSlot();
+
+                while (bucket.pages[ix] != null) : (ix = (ix + 1) % capacity) {
+                    if (bucket.fingerprints[ix] == fingerprint) {
+                        const e = bucket.pages[ix].?.entities[bucket.indices[ix]];
+                        if (e != key) continue;
+
+                        // shuffle entries in bucket to preserve hashmap structure
+                        var ix_remove = ix;
+                        var ix_shift = ix_remove;
+                        var dist: usize = 1;
+                        while (true) {
+                            ix_shift = (ix_shift + 1) % capacity;
+                            const page_shift = bucket.pages[ix_shift] orelse {
+                                bucket.pages[ix_remove] = null;
+                                bucket.len -= 1;
+                                return true;
+                            };
+                            const key_shift = page_shift.entities[bucket.indices[ix_shift]];
+                            const key_dist = (ix_shift -% key_shift) % capacity;
+                            if (key_dist >= dist) {
+                                bucket.pages[ix_remove] = bucket.pages[ix_shift];
+                                bucket.indices[ix_remove] = bucket.indices[ix_shift];
+                                bucket.fingerprints[ix_remove] = bucket.fingerprints[ix_shift];
+                                ix_remove = ix_shift;
+                                dist = 1;
+                            } else {
+                                dist += 1;
+                            }
+                        }
+                    }
+                }
+
+                return false;
+            }
+
+            fn update(bucket: *Bucket, key: Key, page: *Page, index: usize) bool {
+                const fingerprint = key.fingerprint();
+                var ix = key.bucketSlot();
+
+                while (bucket.pages[ix] != null) : (ix = (ix + 1) % capacity) {
+                    if (bucket.fingerprints[ix] == fingerprint) {
+                        const e = bucket.pages[ix].?.entities[bucket.indices[ix]];
+                        if (e == key) {
+                            bucket.pages[ix] = page;
+                            bucket.indices[ix] = index;
+                            bucket.fingerprints[ix] = fingerprint;
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            }
+
+            fn get(bucket: Bucket, key: Key) ?EntityView(.{}) {
+                const fingerprint = key.fingerprint();
+                var ix = key.bucketSlot();
+
+                while (bucket.pages[ix] != null) : (ix = (ix + 1) % capacity) {
+                    if (bucket.fingerprints[ix] == fingerprint) {
+                        const e = bucket.pages[ix].?.entities[bucket.indices[ix]];
+                        if (e == key) return .{
+                            .page = bucket.pages[ix].?,
+                            .index = bucket.indices[ix],
+                            .query = undefined,
+                        };
+                    }
+                }
+
+                return null;
+            }
+        };
+        const BucketInfo = struct { bucket: *Bucket, depth: usize };
+
+        const Page = struct {
+            // pages hold the actual entity data, with one page per archetype
+            const Head = struct {
+                keys: [*]Key,
+                components: [n_components]usize,
+                capacity: usize,
+                len: usize,
+            };
+            head: Head,
+            data: [BlockPool.block_size - @sizeOf(Head)]u8,
+
+            fn componentSet(page: Page) ComponentSet {
+                var set = ComponentSet.initEmpty();
+                for (page.components, 0..) |a, i| {
+                    if (a != 0) set.set(i);
+                }
+                return set;
+            }
+
+            fn hasComponent(page: Page, component: Component) bool {
+                return page.components[@intFromEnum(component)] != 0;
+            }
+        };
+        const PageInfo = struct { page: *Page, set: ComponentSet };
+
+        pub const Template = blk: {
+            // generate a type that has all components as optionals
+            var fields: [n_components]std.builtin.Type.StructField = undefined;
+            @memcpy(&fields, std.meta.fields(ComponentSpec));
+            for (0..fields.len) |i| {
+                fields[i].default_value = &@as(?fields[i].type, null);
+                fields[i].type = ?fields[i].type;
+            }
+            const info: std.builtin.Type = .{ .@"struct" = std.builtin.Type.Struct{
+                .layout = .auto,
+                .fields = &fields,
+                .decls = &.{},
+                .is_tuple = false,
+            } };
+            break :blk @Type(info);
+            // it would be nice if it had a function that produced the componentset
+            // but that's a lot of comptime-fu
+        };
 
         const RawWorldViewInfo = struct {
             component_read: []const Component = &.{},
@@ -469,6 +564,28 @@ pub fn World(comptime ComponentSpec: type, comptime QueueSpec: type) type {
             optional_read: []const Component = &.{},
             optional_read_write: []const Component = &.{},
             exclude: []const Component = &.{},
+
+            const read_any = RawQueryInfo{
+                .optinal_read = blk: {
+                    var components: []const Component = &{};
+                    for (0..n_components) |i| {
+                        const component: Component = @enumFromInt(i);
+                        components = components ++ component;
+                    }
+                    break :blk components;
+                },
+            };
+
+            const read_write_any = RawQueryInfo{
+                .optinal_read_write = blk: {
+                    var components: []const Component = &{};
+                    for (0..n_components) |i| {
+                        const component: Component = @enumFromInt(i);
+                        components = components ++ component;
+                    }
+                    break :blk components;
+                },
+            };
 
             fn reify(raw: RawQueryInfo) QueryInfo {
                 var result = QueryInfo{
@@ -509,49 +626,265 @@ pub fn World(comptime ComponentSpec: type, comptime QueueSpec: type) type {
         fn WorldView(comptime raw_info: RawWorldViewInfo) type {
             return struct {
                 comptime info: WorldViewInfo = raw_info.reify(),
+                world: *Self,
             };
         }
 
-        const Bucket = struct {};
-        const Page = struct {};
+        fn PageView(comptime raw_info: RawQueryInfo) type {
+            return struct {
+                comptime info: QueryInfo = raw_info.reify(),
+                page: *Page,
+            };
+        }
+
+        fn EntityView(comptime raw_info: RawQueryInfo) type {
+            return struct {
+                comptime info: QueryInfo = raw_info.reify(),
+                page: *Page,
+                index: usize,
+            };
+        }
 
         pool: *BlockPool,
-        keygen: *KeyGen,
+        keygen: *KeyGenerator,
 
-        // // pages hold the actual entity data, with one page per archetype
-        // pages: std.ArrayList(*Page),
-        // archetypes: std.ArrayList(Archetype),
+        pages: std.MultiArrayList(PageInfo),
+        buckets: std.MultiArrayList(BucketInfo),
+        depth: usize, // extendible hashing
 
-        // // buckets hold a lookup table from an entity to it's location in a page
-        // depth: usize = 0,
-        // buckets: std.ArrayList(*Bucket), // extendible hashing
-        // bucket_depths: std.ArrayList(usize),
+        create_queue: TypedQueue(CreateQueueEntry),
+        destroy_queue: TypedQueue(Key),
+        insert_queues: [n_components]UntypedQueue,
+        remove_queues: [n_components]TypedQueue(Key),
+        queues: [n_queues]UntypedQueue,
 
-        // create_queue: TypedQueue(CreateQueueEntry),
-        // destroy_queue: TypedQueue(Entity),
-        // insert_queues: [n_components]UntypedQueue,
-        // remove_queues: [n_components]TypedQueue(Entity),
-        // queues: [n_queues]UntypedQueue,
-
-        fn init(pool: *BlockPool, keygen: *KeyGen) World {
-            return .{
+        pub fn init(pool: *BlockPool, keygen: *KeyGenerator) Self {
+            var world = Self{
                 .pool = pool,
                 .keygen = keygen,
+                .pages = std.MultiArrayList(PageInfo){},
+                .buckets = std.MultiArrayList(BucketInfo){},
+                .depth = 0,
+                .create_queue = TypedQueue(CreateQueueEntry).init(pool),
+                .destroy_queue = TypedQueue(Key).init(pool),
+                .insert_queues = undefined,
+                .remove_queues = undefined,
+                .queues = undefined,
             };
+            for (0..n_components) |i| {
+                world.insert_queues[i] = UntypedQueue.init(pool);
+                world.remove_queues[i] = TypedQueue(Key).init(pool);
+            }
+            for (0..n_queues) |i| {
+                world.queues[i] = UntypedQueue.init(pool);
+            }
+            return world;
         }
 
-        fn deinit(world: *World) void {
+        pub fn deinit(world: *Self) void {
             world.* = undefined;
+        }
+
+        pub fn queueCreate(world: *Self, template: Template) !Key {
+            const key = world.keygen.next();
+            try world.queueCreateKnown(key, template);
+            return key;
+        }
+
+        fn queueCreateKnown(world: *Self, key: Key, template: Template) !void {
+            std.debug.assert(key != .nil);
+            try world.create_queue.push(.{ .key = key, .template = template });
+        }
+
+        pub fn queueDestroy(world: *Self, key: Key) !void {
+            std.debug.assert(key != .nil);
+            try world.destroy_queue.push(key);
+        }
+
+        pub fn queueInsert(
+            world: *Self,
+            key: Key,
+            comptime component: Component,
+            value: ComponentType(component),
+        ) !void {
+            std.debug.assert(key != .nil);
+            try world.insert_queues[@intFromEnum(component)].push(
+                InsertQueueEntry(ComponentType(component)),
+                .{ .key = key, .value = value },
+            );
+        }
+
+        pub fn queueRemove(world: *Self, key: Key, comptime component: Component) !void {
+            std.debug.assert(key != .nil);
+            try world.remove_queues[@intFromEnum(component)].push(key);
+        }
+
+        fn resolveCreateQueue(world: *Self) !void {
+            while (true) {
+                // peek first since if bucketEnsure or getPage fails we want to be able to retry
+                const q = world.create_queue.peek() orelse break;
+                try world.bucketEnsure(q.key);
+                var set = ComponentSet.initEmpty();
+                inline for (std.meta.fields(Template), 0..) |field, i| {
+                    if (@field(q.template, field.name) != null) set.set(i);
+                }
+                const page = try world.getPage(set);
+                const index = page.append(q.entity, q.template);
+                world.bucketInsert(q.entity, page, index);
+                _ = world.create_queue.pop();
+            }
+        }
+
+        fn resolveDestroyQueue(world: *Self) void {
+            while (world.destroy_queue.pop()) |k| {
+                // NOTE trying to destroy an entity twice is legal (simpler that way imo)
+                const view = world.bucketGet(k) orelse continue;
+                world.bucketRemove(k);
+                const moved = view.page.erase(k.index);
+                if (moved != .nil) world.bucketUpdate(moved, view.page, view.index);
+            }
+        }
+
+        pub fn resolveQueues(world: *Self) !void {
+            // NOTE we could cancel out creates with immediate destroys
+            // and save some processing in those cases, but it's unclear if that's worth it
+            try world.resolveCreateQueue();
+            world.resolveDestroyQueue();
+
+            // inline for (0..n_components) |i| {
+            //     const c: Component = @enumFromInt(i);
+            //     const C = ComponentType(c);
+
+            //     while (true) {
+            //         const q = world.insert_queues[i].peek(InsertQueueEntry(C)) orelse break;
+            //         const entity = world.get(q.entity) orelse continue;
+            //         if (entity.page.hasComponent(c)) continue;
+            //         var set = entity.page.componentSet();
+            //         set.set(i);
+            //         const page = try world.getPage(set);
+            //         var template = entity.getTemplate();
+            //         @field(template, @tagName(c)) = q.value;
+            //         const index = page.append(q.entity, q.template);
+            //         const moved = entity.page.erase(entity.index);
+            //         world.updateLookup(q.entity, page, index);
+            //         if (moved != 0) world.updateLookup(moved, entity.page, entity.index);
+            //         _ = world.insert_queues[i].pop(InsertQueueEntry(C));
+            //     }
+
+            //     while (world.remove_queues[i].pop()) |e| {
+            //         _ = e; // todo
+            //     }
+
+            //     // update components on entities by destroying and recreating at a batch level
+            //     // alternative would be to update per modification which may be more efficent
+            //     // as it causes less edits to the lookup table, and lower memory use overall
+            //     // std.debug.assert(world.create_queue.empty());
+            //     // std.debug.assert(world.destroy_queue.empty());
+            //     // const c: Component = @enumFromInt(i);
+            //     // const C = ComponentType(c);
+            //     // while (world.insert_queues[i].pop(InsertQueueEntry(C))) |q| {
+            //     //     const entity = world.lookup(q.entity) orelse continue;
+            //     //     if (entity.page.components[i] != 0) {
+            //     //         std.debug.print("entity has component, ignoring insert\n", .{});
+            //     //         continue;
+            //     //     }
+            //     //     var template = entity.getTemplate();
+            //     //     @field(template, @tagName(c)) = q.value;
+            //     //     try world.queueCreate2(q.entity, template);
+            //     //     try world.queueDestroy(q.entity);
+            //     // }
+            //     // world.processDestroyQueue();
+            //     // try world.processCreateQueue();
+
+            //     // std.debug.assert(world.create_queue.empty());
+            //     // std.debug.assert(world.destroy_queue.empty());
+            //     // while (world.remove_queues[i].pop()) |e| {
+            //     //     const entity = world.lookup(e) orelse continue;
+            //     //     if (entity.page.components[i] == 0) {
+            //     //         std.debug.print("entity lacks component, ignoring remove\n", .{});
+            //     //         continue;
+            //     //     }
+            //     //     var template = entity.getTemplate();
+            //     //     @field(template, @tagName(c)) = null;
+            //     //     try world.queueCreate2(e, template);
+            //     //     try world.queueDestroy(e);
+            //     // }
+            //     // world.processDestroyQueue();
+            //     // try world.processCreateQueue();
+            // }
+
+            // cleanup pages with no entities
+            var ix: usize = 0;
+            while (ix < world.pages.items.len) {
+                if (world.pages.items[ix].len > 0) {
+                    ix += 1;
+                    continue;
+                }
+                const page = world.pages.items(.page)[ix];
+                world.pages.swapRemove(ix);
+                world.pool.destroy(page);
+            }
+        }
+
+        fn getPage(world: *Self, set: ComponentSet) !*Page {
+            _ = world;
+            _ = set;
+        }
+
+        fn bucketEnsure(world: *Self, key: Key) !void {
+            _ = world;
+            _ = key;
+        }
+
+        /// always call bucketEnsure before calling this
+        fn bucketInsert(world: *Self, key: Key, page: *Page, index: usize) void {
+            _ = world;
+            _ = key;
+            _ = page;
+            _ = index;
+        }
+
+        fn bucketUpdate(world: *Self, key: Key, page: *Page, index: usize) void {
+            _ = world;
+            _ = key;
+            _ = page;
+            _ = index;
+        }
+
+        fn bucketRemove(world: *Self, key: Key) void {
+            _ = world;
+            _ = key;
+        }
+
+        fn bucketGet(world: *Self, key: Key, comptime info: QueryInfo) EntityView(info) {
+            _ = world;
+            _ = key;
+        }
+
+        pub fn get(world: *Self, key: Key) ?EntityView(.read_write_any) {
+            _ = world;
+            _ = key;
         }
     };
 }
 
 test "world" {
-    const W = World(struct { x: u32 }, struct {});
-    const WW = W.WorldView(.{ .component_read = &[_]W.Component{.x} });
-    const ww = WW{};
-    std.debug.print("{}\n{} {}\n", .{ WW, @sizeOf(WW), @alignOf(WW) });
-    std.debug.print("{}\n", .{ww.info});
+    var pool = BlockPool.init(std.testing.allocator);
+    defer pool.deinit();
+    var kg = KeyGenerator{};
+
+    const W = World(struct { x: u32, y: f64 }, struct {});
+    var w = W.init(&pool, &kg);
+    defer w.deinit();
+
+    const e0 = try w.queueCreate(.{ .x = 1 });
+    const e1 = try w.queueCreate(.{ .y = 2.5 });
+    const e2 = try w.queueCreate(.{ .x = 3, .y = 3.5 });
+    try w.resolveQueues();
+
+    _ = e0;
+    _ = e1;
+    _ = e2;
 }
 
 // world
