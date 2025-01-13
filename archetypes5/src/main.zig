@@ -2,11 +2,6 @@ const builtin = @import("builtin");
 const std = @import("std");
 
 const single_threaded = builtin.single_threaded;
-const DummyMutex = struct {
-    fn lock(_: *DummyMutex) void {}
-    fn unlock(_: *DummyMutex) void {}
-};
-const Mutex = if (single_threaded) DummyMutex else std.Thread.Mutex;
 
 pub const BlockPool = @import("block_pool.zig").BlockPool;
 
@@ -17,65 +12,80 @@ const UntypedQueue = struct {
     // think about locking structure?
     // basically, we should either have multiple simultaneous writers
     // or one single reader
-    // (or should we allow multiple simultaneous readers too?)
-    // but reading and writing should never be allowed at the same time
 
-    // we could have some accessors/views that allow for just one or the other
-    // and then stick the locking in there for writing only
+    // what about iterators?
+    // the ability to iterate over the values, in case we want to process the queue more than once
+    // seems like it could be useful (though can be faked using count and pop->push)
+    // a page iterator could be nice if we need to do multithreaded processing of a queue
+    // however, it's unclear whether that'd actually be useful?
 
-    // also, maybe iterator shouldn't exist?
-    // or we should have a pageiterator & valueiterator like with the entities?
+    // i think for now, push/pop functionality is enough
+    // but it would be nicely consistent if both entities and queues have the same iterator vibe
 
     const Page = struct {
-        head: usize,
-        tail: usize,
-        capacity: usize,
-        _values: usize,
-        next: ?*Page,
-        bytes: [BlockPool.block_size - 64]u8,
+        const Head = struct {
+            head: usize,
+            tail: usize,
+            capacity: usize,
+            _values: usize,
+            next: ?*Page,
+        };
+        header: Head,
+        bytes: [BlockPool.block_size - @sizeOf(Head)]u8,
 
         fn create(pool: *BlockPool, comptime T: type) !*Page {
             const page = try pool.create(Page);
-            page.head = 0;
-            page.tail = 0;
-            page.capacity = page.bytes.len / @sizeOf(T) - 1;
-            page._values = std.mem.alignForward(usize, @intFromPtr(&page.bytes[0]), @alignOf(T));
-            page.next = null;
+            page.header.head = 0;
+            page.header.tail = 0;
+            page.header.capacity = page.bytes.len / @sizeOf(T) - 1;
+            page.header._values = std.mem.alignForward(usize, @intFromPtr(&page.bytes[0]), @alignOf(T));
+            page.header.next = null;
             return page;
         }
 
         fn push(page: *Page, comptime T: type, value: T) void {
-            std.debug.assert(page.tail < page.capacity);
-            page.values(T)[page.tail] = value;
-            page.tail += 1;
+            std.debug.assert(page.header.tail < page.header.capacity);
+            page.values(T)[page.header.tail] = value;
+            page.header.tail += 1;
         }
 
         fn peek(page: *Page, comptime T: type) ?T {
-            if (page.head == page.tail) return null;
-            return page.values(T)[page.head];
+            if (page.header.head == page.header.tail) return null;
+            return page.values(T)[page.header.head];
         }
 
         fn pop(page: *Page, comptime T: type) ?T {
-            if (page.head == page.tail) return null;
-            const value = page.values(T)[page.head];
-            page.head += 1;
+            if (page.header.head == page.header.tail) return null;
+            const value = page.values(T)[page.header.head];
+            page.header.head += 1;
             return value;
         }
 
         fn values(page: *Page, comptime T: type) [*]T {
-            return @ptrFromInt(page._values);
+            return @ptrFromInt(page.header._values);
+        }
+
+        fn full(page: *Page) bool {
+            return page.header.tail == page.header.capacity;
         }
     };
     comptime {
         std.debug.assert(@sizeOf(Page) <= BlockPool.block_size);
     }
 
+    // NOTE we have a singly linked list of pages
+    // the page with the first value is at head, and is the actual head of the linked list
+    // the page with the last value is at tail
+    // end is the last page in the linked list
+    // this setup ensures that we can ensure capacity beyond page-capacity limits
+
     pool: *BlockPool,
     len: usize,
     capacity: usize,
     head: ?*Page,
     tail: ?*Page,
-    mutex: Mutex,
+    end: ?*Page,
+    mutex: std.Thread.Mutex,
 
     fn init(pool: *BlockPool) UntypedQueue {
         return .{
@@ -84,7 +94,8 @@ const UntypedQueue = struct {
             .capacity = 0,
             .head = null,
             .tail = null,
-            .mutex = Mutex{},
+            .end = null,
+            .mutex = std.Thread.Mutex{},
         };
     }
 
@@ -92,7 +103,7 @@ const UntypedQueue = struct {
         queue.mutex.lock();
         var walk = queue.head;
         while (walk) |page| {
-            walk = page.next;
+            walk = page.header.next;
             queue.pool.destroy(page);
         }
         queue.* = undefined;
@@ -105,108 +116,75 @@ const UntypedQueue = struct {
         queue.* = UntypedQueue.init(pool);
     }
 
-    fn empty(queue: *UntypedQueue) bool {
-        const head = queue.head orelse return true;
-        return head.head == head.tail;
-    }
-
+    /// protected by mutex
     fn ensureCapacity(queue: *UntypedQueue, comptime T: type, n: usize) !void {
+        queue.mutex.lock();
+        defer queue.mutex.unlock();
+        try queue.ensureCapacityUnprotected(T, n);
+    }
+    fn ensureCapacityUnprotected(queue: *UntypedQueue, comptime T: type, n: usize) !void {
+        if (queue.end == null) {
+            std.debug.assert(queue.head == null);
+            std.debug.assert(queue.tail == null);
+            queue.end = try Page.create(queue.pool, T);
+            queue.head = queue.end;
+            queue.tail = queue.end;
+            queue.capacity += queue.end.?.header.capacity;
+        }
+
         while (queue.capacity < n) {
-            if (queue.tail == null) {
-                queue.tail = try Page.create(queue.pool, T);
-                queue.head = queue.tail;
-            } else if (queue.tail.?.tail == queue.tail.?.capacity) {
-                const tail = try Page.create(queue.pool, T);
-                queue.tail.?.next = tail;
-                queue.tail = tail;
-            } else {
-                @panic("???");
-            }
-            queue.capacity += queue.tail.?.capacity;
+            const end = try Page.create(queue.pool, T);
+            queue.end.?.header.next = end;
+            queue.end = end;
+            queue.capacity += queue.end.?.header.capacity;
         }
     }
 
+    /// protected by mutex
     fn push(queue: *UntypedQueue, comptime T: type, value: T) !void {
         queue.mutex.lock();
         defer queue.mutex.unlock();
-        try queue.ensureCapacity(T, 1);
+        try queue.ensureCapacityUnprotected(T, 1);
+        if (queue.tail.?.full()) queue.tail = queue.tail.?.header.next;
         queue.tail.?.push(T, value);
         queue.len += 1;
         queue.capacity -= 1;
     }
 
+    /// protected by mutex
     fn pushAssumeCapacity(queue: *UntypedQueue, comptime T: type, value: T) void {
         queue.mutex.lock();
         defer queue.mutex.unlock();
         std.debug.assert(queue.capacity >= 1);
+        if (queue.tail.?.full()) queue.tail = queue.tail.?.header.next;
         queue.tail.?.push(T, value);
         queue.len += 1;
         queue.capacity -= 1;
     }
 
     fn peek(queue: *UntypedQueue, comptime T: type) ?T {
-        queue.mutex.lock();
-        defer queue.mutex.unlock();
         const head = queue.head orelse return null;
         return head.peek(T);
     }
 
     fn pop(queue: *UntypedQueue, comptime T: type) ?T {
-        queue.mutex.lock();
-        defer queue.mutex.unlock();
         const head = queue.head orelse return null;
         const value = head.pop(T) orelse return null;
-        if (head.head == head.capacity) {
-            queue.head = head.next;
+        if (head.header.head == head.header.capacity) {
+            queue.head = head.header.next;
+            if (queue.head == null) {
+                // if our head ran out of capacity, and it was also end, null out the tail/end
+                queue.tail = null;
+                queue.end = null;
+            }
             queue.pool.destroy(head);
         }
         queue.len -= 1;
         return value;
     }
 
-    fn pageIterator(queue: *UntypedQueue, comptime T: type) PageIterator(T) {
-        // TODO
-        _ = queue;
-    }
-
-    fn PageIterator(comptime T: type) type {
-        // TODO
-        _ = T;
-        return struct {
-            const ValueIterator = struct {};
-        };
-    }
-
-    fn iterator(queue: *UntypedQueue, comptime T: type) Iterator(T) {
-        queue.mutex.lock();
-        defer queue.mutex.unlock();
-        return .{
-            .page = queue.head,
-            .cursor = if (queue.head) |head| head.head else undefined,
-        };
-    }
-
-    fn Iterator(comptime T: type) type {
-        return struct {
-            const Self = @This();
-
-            page: ?*Page,
-            cursor: usize,
-
-            fn next(it: *Self) ?T {
-                const page = it.page orelse return null;
-
-                while (it.cursor < page.tail) {
-                    const result = page.values(T)[it.cursor];
-                    it.cursor += 1;
-                    return result;
-                }
-
-                it.page = page.next;
-                if (it.page != null) it.cursor = it.page.?.head;
-                return it.next();
-            }
-        };
+    fn count(queue: *UntypedQueue) usize {
+        return queue.len;
     }
 };
 
@@ -228,18 +206,17 @@ fn TypedQueue(comptime T: type) type {
             queue.untyped.reset();
         }
 
-        fn empty(queue: *Self) bool {
-            return queue.untyped.empty();
-        }
-
+        /// protected by mutex
         fn ensureCapacity(queue: *Self, n: usize) !void {
             try queue.untyped.ensureCapacity(T, n);
         }
 
+        /// protected by mutex
         fn push(queue: *Self, value: T) !void {
             try queue.untyped.push(T, value);
         }
 
+        /// protected by mutex
         fn pushAssumeCapacity(queue: *Self, value: T) void {
             queue.untyped.pushAssumeCapacity(T, value);
         }
@@ -252,13 +229,62 @@ fn TypedQueue(comptime T: type) type {
             return queue.untyped.pop(T);
         }
 
-        fn iterator(queue: *Self) UntypedQueue.Iterator(T) {
-            return queue.untyped.iterator(T);
+        fn count(queue: *Self) usize {
+            return queue.untyped.count();
         }
     };
 }
 
-test "queue" {
+test "queue edge cases" {
+    var pool = BlockPool.init(std.testing.allocator);
+    defer pool.deinit();
+    var q = TypedQueue(u32).init(&pool);
+    defer q.deinit();
+    var a = std.ArrayList(u32).init(std.testing.allocator);
+    defer a.deinit();
+
+    for (0..10) |i| {
+        a.clearRetainingCapacity();
+        for (0..4085) |j| {
+            const x: u32 = @intCast(i * 1000_000 + j);
+            try a.append(x);
+            try q.push(x);
+            try std.testing.expectEqual(a.items.len, q.count());
+        }
+        for (a.items) |x| {
+            try std.testing.expectEqual(x, q.pop());
+        }
+        try std.testing.expectEqual(null, q.pop());
+    }
+
+    for (0..10) |i| {
+        a.clearRetainingCapacity();
+        try q.ensureCapacity(4085);
+        for (0..4085) |j| {
+            const x: u32 = @intCast(i * 1000_000 + j);
+            try a.append(x);
+            try q.push(x);
+            try std.testing.expectEqual(a.items.len, q.count());
+        }
+        for (a.items) |x| {
+            try std.testing.expectEqual(x, q.pop());
+        }
+        try std.testing.expectEqual(null, q.pop());
+        a.clearRetainingCapacity();
+        for (0..4085) |j| {
+            const x: u32 = @intCast(i * 1000_000 + j);
+            try a.append(x);
+            try q.push(x);
+            try std.testing.expectEqual(a.items.len, q.count());
+        }
+        for (a.items) |x| {
+            try std.testing.expectEqual(x, q.pop());
+        }
+        try std.testing.expectEqual(null, q.pop());
+    }
+}
+
+test "queue fuzz" {
     var pool = BlockPool.init(std.testing.allocator);
     defer pool.deinit();
     var q = TypedQueue(u32).init(&pool);
@@ -269,17 +295,15 @@ test "queue" {
     var rng = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
     const rand = rng.random();
 
-    for (0..100) |_| {
+    for (0..1000) |_| {
         a.clearRetainingCapacity();
-        const y = rand.uintLessThan(usize, 1000);
+        const y = rand.uintLessThan(usize, 10000);
+        try q.ensureCapacity(y / 2);
         for (0..y) |_| {
             const x = rand.int(u32);
             try a.append(x);
             try q.push(x);
-        }
-        var it = q.iterator();
-        for (a.items) |x| {
-            try std.testing.expectEqual(x, it.next());
+            try std.testing.expectEqual(a.items.len, q.count());
         }
         for (a.items) |x| {
             try std.testing.expectEqual(x, q.pop());
@@ -308,7 +332,7 @@ pub const Key = enum(u64) {
 
 pub const KeyGenerator = struct {
     counter: u64 = 1,
-    mutex: Mutex = Mutex{},
+    mutex: std.Thread.Mutex = std.Thread.Mutex{},
 
     fn next(keygen: *KeyGenerator) Key {
         // xorshift* with 2^64 - 1 period (0 is fixed point, and also the null entity)
@@ -526,6 +550,83 @@ pub fn Context(
 
                 _ecs: *Ctx,
                 _world: *World,
+
+                /// entity lookup can fail if the key is invalid (should nil be illegal?)
+                fn entity(view: V, key: Key) ?EntityView(.{}) { // TODO query from view
+                    _ = view;
+                    _ = key;
+                }
+
+                /// compile error queue is not in view info
+                fn queue(view: V, comptime q: Queue) QueueView(.{}, QueueType(q)) { // TODO v->q
+                    // todo compile error
+                    _ = view;
+                }
+
+                fn resource(view: V, comptime r: Resource) ResourceType(r) {
+                    comptime std.debug.assert(view_info.resource.contains(r));
+                    return @field(view._ecs.resources, @tagName(r));
+                }
+
+                fn resourcePtr(view: V, comptime r: Resource) *ResourceType(r) {
+                    comptime std.debug.assert(view_info.resource.contains(r));
+                    return &@field(view._ecs.resources, @tagName(r));
+                }
+
+                pub fn pageIterator(
+                    view: V,
+                    comptime raw_query_info: RawQueryInfo,
+                ) PageIterator(raw_query_info) {
+                    _ = view;
+                }
+
+                fn PageIterator(comptime raw_query_info: RawQueryInfo) type {
+                    return struct {
+                        const PI = @This();
+                        const query_info = raw_query_info.reify();
+                        view: V,
+                        cursor: usize,
+
+                        pub fn next(iterator: *PI) ?PageView(raw_query_info) {
+                            _ = iterator;
+                            return null;
+                        }
+                    };
+                }
+            };
+        }
+
+        fn PageView(comptime raw_query_info: RawQueryInfo) type {
+            return struct {
+                const PV = @This();
+                const query_info = raw_query_info.reify();
+            };
+        }
+
+        fn EntityView(comptime raw_query_info: RawQueryInfo) type {
+            return struct {
+                const PV = @This();
+                const query_info = raw_query_info.reify();
+            };
+        }
+
+        fn QueueView(comptime raw_query_info: RawQueryInfo, comptime T: type) type {
+            return struct {
+                const QV = @This();
+                const query_info = raw_query_info.reify();
+
+                _queue: TypedQueue(T),
+
+                // TODO expose functions
+                // -- write only
+                // push
+                // ensureCapacity
+                // pushAssumeCapacity
+                // -- read write
+                // pop
+                // peek
+                // reset
+                // count
             };
         }
 
@@ -554,13 +655,26 @@ pub fn Context(
 
             create_queue: TypedQueue(CreateQueueEntry),
             destroy_queue: TypedQueue(Key),
-            insert_queues: [n_components]UntypedQueue,
-            remove_queues: [n_components]TypedQueue(Key),
+            insert_queues: std.EnumArray(UntypedQueue),
+            remove_queues: std.EnumArray(TypedQueue(Key)),
         };
 
         pool: *BlockPool,
-        queues: [n_queues]UntypedQueue,
+        queues: std.EnumArray(UntypedQueue),
         resources: ResourceSpec,
+
+        fn create(pool: *BlockPool) !*Ctx {
+            const ctx = try pool.alloc.create(Ctx);
+            ctx.pool = pool;
+            for (0..n_queues) |i| {
+                ctx.queues[i] = UntypedQueue.init(pool);
+            }
+            return ctx;
+        }
+
+        fn destroy(ctx: *Ctx) void {
+            ctx.pool.alloc.destroy(ctx);
+        }
     };
 }
 
