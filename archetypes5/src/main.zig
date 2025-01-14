@@ -188,57 +188,10 @@ const UntypedQueue = struct {
     }
 };
 
-fn TypedQueue(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        untyped: UntypedQueue,
-
-        fn init(pool: *BlockPool) Self {
-            return .{ .untyped = UntypedQueue.init(pool) };
-        }
-
-        fn deinit(queue: *Self) void {
-            queue.untyped.deinit();
-        }
-
-        fn reset(queue: *Self) void {
-            queue.untyped.reset();
-        }
-
-        /// protected by mutex
-        fn ensureCapacity(queue: *Self, n: usize) !void {
-            try queue.untyped.ensureCapacity(T, n);
-        }
-
-        /// protected by mutex
-        fn push(queue: *Self, value: T) !void {
-            try queue.untyped.push(T, value);
-        }
-
-        /// protected by mutex
-        fn pushAssumeCapacity(queue: *Self, value: T) void {
-            queue.untyped.pushAssumeCapacity(T, value);
-        }
-
-        fn peek(queue: *Self) ?T {
-            return queue.untyped.peek(T);
-        }
-
-        fn pop(queue: *Self) ?T {
-            return queue.untyped.pop(T);
-        }
-
-        fn count(queue: *Self) usize {
-            return queue.untyped.count();
-        }
-    };
-}
-
 test "queue edge cases" {
     var pool = BlockPool.init(std.testing.allocator);
     defer pool.deinit();
-    var q = TypedQueue(u32).init(&pool);
+    var q = UntypedQueue.init(&pool);
     defer q.deinit();
     var a = std.ArrayList(u32).init(std.testing.allocator);
     defer a.deinit();
@@ -248,46 +201,46 @@ test "queue edge cases" {
         for (0..4085) |j| {
             const x: u32 = @intCast(i * 1000_000 + j);
             try a.append(x);
-            try q.push(x);
+            try q.push(u32, x);
             try std.testing.expectEqual(a.items.len, q.count());
         }
         for (a.items) |x| {
-            try std.testing.expectEqual(x, q.pop());
+            try std.testing.expectEqual(x, q.pop(u32));
         }
-        try std.testing.expectEqual(null, q.pop());
+        try std.testing.expectEqual(null, q.pop(u32));
     }
 
     for (0..10) |i| {
         a.clearRetainingCapacity();
-        try q.ensureCapacity(4085);
+        try q.ensureCapacity(u32, 4085);
         for (0..4085) |j| {
             const x: u32 = @intCast(i * 1000_000 + j);
             try a.append(x);
-            try q.push(x);
+            try q.push(u32, x);
             try std.testing.expectEqual(a.items.len, q.count());
         }
         for (a.items) |x| {
-            try std.testing.expectEqual(x, q.pop());
+            try std.testing.expectEqual(x, q.pop(u32));
         }
-        try std.testing.expectEqual(null, q.pop());
+        try std.testing.expectEqual(null, q.pop(u32));
         a.clearRetainingCapacity();
         for (0..4085) |j| {
             const x: u32 = @intCast(i * 1000_000 + j);
             try a.append(x);
-            try q.push(x);
+            try q.push(u32, x);
             try std.testing.expectEqual(a.items.len, q.count());
         }
         for (a.items) |x| {
-            try std.testing.expectEqual(x, q.pop());
+            try std.testing.expectEqual(x, q.pop(u32));
         }
-        try std.testing.expectEqual(null, q.pop());
+        try std.testing.expectEqual(null, q.pop(u32));
     }
 }
 
 test "queue fuzz" {
     var pool = BlockPool.init(std.testing.allocator);
     defer pool.deinit();
-    var q = TypedQueue(u32).init(&pool);
+    var q = UntypedQueue.init(&pool);
     defer q.deinit();
     var a = std.ArrayList(u32).init(std.testing.allocator);
     defer a.deinit();
@@ -298,17 +251,17 @@ test "queue fuzz" {
     for (0..1000) |_| {
         a.clearRetainingCapacity();
         const y = rand.uintLessThan(usize, 10000);
-        try q.ensureCapacity(y / 2);
+        try q.ensureCapacity(u32, y / 2);
         for (0..y) |_| {
             const x = rand.int(u32);
             try a.append(x);
-            try q.push(x);
+            try q.push(u32, x);
             try std.testing.expectEqual(a.items.len, q.count());
         }
         for (a.items) |x| {
-            try std.testing.expectEqual(x, q.pop());
+            try std.testing.expectEqual(x, q.pop(u32));
         }
-        try std.testing.expectEqual(null, q.pop());
+        try std.testing.expectEqual(null, q.pop(u32));
     }
 }
 
@@ -480,6 +433,13 @@ pub fn Context(
                 for (raw.resource) |c| info.resource.insert(c);
                 return info;
             }
+
+            fn permissiveQueryInfo(raw: RawViewInfo) RawQueryInfo {
+                return .{
+                    .optional_read = raw.component_read,
+                    .optional_read_write = raw.component_read_write,
+                };
+            }
         };
         const ViewInfo = struct {
             component_read: ComponentSet,
@@ -544,33 +504,69 @@ pub fn Context(
         };
 
         fn View(comptime raw_view_info: RawViewInfo) type {
+            // NOTE
+            // should queueX functions on world be replicated here?
+            // should they be only on the view?
+            // i think they ought to be replicated since:
+            // - we might want to call them in a system, hence they should be in the view
+            // - exposing world is unwise, since resolve should not be called in a system
+            // - we might want to add/remove entities from a world outside of a context
+            //   i.e. during loading a world to prepare for merging
+            //   or as cleanup after a split perhaps
             return struct {
                 const V = @This();
                 const view_info = raw_view_info.reify();
+                const permissive_query_info = raw_view_info.permissiveQueryInfo();
 
                 _ecs: *Ctx,
                 _world: *World,
 
                 /// entity lookup can fail if the key is invalid (should nil be illegal?)
-                fn entity(view: V, key: Key) ?EntityView(.{}) { // TODO query from view
-                    _ = view;
-                    _ = key;
+                fn entity(view: V, key: Key) ?EntityView(permissive_query_info) {
+                    return view._world.get(key);
                 }
 
-                /// compile error queue is not in view info
-                fn queue(view: V, comptime q: Queue) QueueView(.{}, QueueType(q)) { // TODO v->q
-                    // todo compile error
-                    _ = view;
+                /// compile error if queue is not in view info
+                fn queue(
+                    view: V,
+                    comptime q: Queue,
+                ) QueueView(permissive_query_info, QueueType(q)) {
+                    comptime std.debug.assert(view_info.queue_write.contains(q) or
+                        view_info.queue_read_write.contains(q));
+                    return .{ ._queue = view._ecs.queues.getPtr(q) };
                 }
 
+                /// compile error if resource is not in view info
                 fn resource(view: V, comptime r: Resource) ResourceType(r) {
                     comptime std.debug.assert(view_info.resource.contains(r));
                     return @field(view._ecs.resources, @tagName(r));
                 }
 
+                /// compile error if resource is not in view info
                 fn resourcePtr(view: V, comptime r: Resource) *ResourceType(r) {
                     comptime std.debug.assert(view_info.resource.contains(r));
                     return &@field(view._ecs.resources, @tagName(r));
+                }
+
+                pub fn queueCreate(view: V, template: Template) !Key {
+                    return view._world.queueCreate(template);
+                }
+
+                pub fn queueDestroy(view: V, key: Key) !void {
+                    return view._world.queueDestroy(key);
+                }
+
+                pub fn queueInsert(
+                    view: V,
+                    key: Key,
+                    comptime component: Component,
+                    value: ComponentType(component),
+                ) !Key {
+                    return view._world.queueInsert(key, component, value);
+                }
+
+                pub fn queueRemove(view: V, key: Key, comptime component: Component) !Key {
+                    return view._world.queueRemove(key, component);
                 }
 
                 pub fn pageIterator(
@@ -600,6 +596,8 @@ pub fn Context(
             return struct {
                 const PV = @This();
                 const query_info = raw_query_info.reify();
+
+                _page: *World.Page,
             };
         }
 
@@ -607,15 +605,19 @@ pub fn Context(
             return struct {
                 const PV = @This();
                 const query_info = raw_query_info.reify();
+
+                _page: *World.Page,
+                _index: usize,
             };
         }
 
         fn QueueView(comptime raw_query_info: RawQueryInfo, comptime T: type) type {
+            _ = T;
             return struct {
                 const QV = @This();
                 const query_info = raw_query_info.reify();
 
-                _queue: TypedQueue(T),
+                _queue: *UntypedQueue,
 
                 // TODO expose functions
                 // -- write only
@@ -631,6 +633,8 @@ pub fn Context(
         }
 
         const World = struct {
+            const page_cache_size = 16;
+
             const Page = struct {};
             const PageInfo = struct {};
             const Bucket = struct {};
@@ -653,10 +657,131 @@ pub fn Context(
             buckets: std.MultiArrayList(BucketInfo),
             depth: usize, // extendible hashing
 
-            create_queue: TypedQueue(CreateQueueEntry),
-            destroy_queue: TypedQueue(Key),
+            create_queue: UntypedQueue,
+            destroy_queue: UntypedQueue,
             insert_queues: std.EnumArray(UntypedQueue),
-            remove_queues: std.EnumArray(TypedQueue(Key)),
+            remove_queues: std.EnumArray(UntypedQueue),
+
+            /// create a new world
+            pub fn create(pool: *BlockPool, keygen: *KeyGenerator) !*World {
+                const world = try pool.alloc.create(World);
+                world.pool = pool;
+                world.keygen = keygen;
+                world.pages = std.MultiArrayList(PageInfo){};
+                world.buckets = std.MultiArrayList(BucketInfo){};
+                world.depth = 0;
+                const empty_queue = UntypedQueue.init(pool); // doesn't alloc, so copy replicates
+                world.create_queue = empty_queue;
+                world.destroy_queue = empty_queue;
+                world.insert_queues = std.EnumArray(UntypedQueue).initFill(empty_queue);
+                world.remove_queues = std.EnumArray(UntypedQueue).initFill(empty_queue);
+                return world;
+            }
+
+            /// destroy the world
+            pub fn destroy(world: *World) void {
+                world.pages.deinit(world.pool.alloc);
+                world.buckets.deinit(world.pool.alloc);
+                world.create_queue.deinit();
+                world.destroy_queue.deinit();
+                var it_insert = world.insert_queues.iterator();
+                while (it_insert.next()) |kv| kv.value.deinit();
+                var it_remove = world.remove_queues.iterator();
+                while (it_remove.next()) |kv| kv.value.deinit();
+                world.pool.alloc.destroy(world);
+            }
+
+            /// queue an entity to be created when World.resolveQueues is called
+            /// returns the key that entity will have
+            pub fn queueCreate(world: *World, template: Template) !Key {
+                const key = world.keygen.next();
+                try world.create_queue.push(
+                    CreateQueueEntry,
+                    .{ .key = key, .template = template },
+                );
+                return key;
+            }
+
+            /// queue an entity to be destroyed when World.resolveQueues is called
+            pub fn queueDestroy(world: *World, key: Key) !void {
+                std.debug.assert(key != .nil);
+                try world.destroy_queue.push(Key, key);
+            }
+
+            /// queue a component to be inserted into an entity when World.resolveQueues is called
+            /// if the entity already has that component, nothing happens
+            pub fn queueInsert(
+                world: *World,
+                key: Key,
+                comptime component: Component,
+                value: ComponentType(component),
+            ) !void {
+                std.debug.assert(key != .nil);
+                try world.insert_queues.getPtr(component).push(
+                    InsertQueueEntry(ComponentType(component)),
+                    .{ .key = key, .value = value },
+                );
+            }
+
+            /// queue a component to be removed from an entity when World.resolveQueues is called
+            /// if the entity doesn't have that component, nothing happens
+            pub fn queueRemove(world: *World, key: Key, comptime component: Component) !void {
+                std.debug.assert(key != .nil);
+                try world.remove_queues.getPtr(component).push(Key, key);
+            }
+
+            /// execute all the changes from the create/destroy/insert/remove queues
+            /// order is create -> destroy -> (per component insert -> remove)
+            /// hence, creating and then immediately destroying before resolve is allowed
+            pub fn resolveQueues(world: *World) !void {
+                // NOTE might need fixing
+                try world.resolveCreateQueue();
+                world.resolveDestroyQueue();
+
+                inline for (0..n_components) |i| {
+                    const c: Component = @enumFromInt(i);
+                    const C = ComponentType(c);
+                    const insert_queue = world.insert_queues.getPtr(c);
+                    const remove_queue = world.remove_queues.getPtr(c);
+
+                    while (true) {
+                        const q = insert_queue.peek(InsertQueueEntry(C)) orelse break;
+                        const entity = world.get(q.key) orelse continue;
+                        if (entity.page.hasComponent(c)) continue;
+                        var set = entity.page.componentSet();
+                        set.set(i);
+                        const page = try world.getPage(set);
+                        var template = entity.template();
+                        @field(template, @tagName(c)) = q.value;
+                        const index = page.append(q.key, template);
+                        world.bucketUpdate(q.key, page, index);
+                        const moved = entity.page.erase(entity.index);
+                        if (moved != .nil) world.bucketUpdate(moved, entity.page, entity.index);
+                        _ = insert_queue.pop(InsertQueueEntry(C));
+                    }
+
+                    while (true) {
+                        const k = remove_queue.peek() orelse break;
+                        const entity = world.get(k) orelse continue;
+                        if (!entity.page.hasComponent(c)) continue;
+                        var set = entity.page.componentSet();
+                        set.unset(i);
+                        const page = try world.getPage(set);
+                        var template = entity.template();
+                        @field(template, @tagName(c)) = null;
+                        const index = page.append(k, template);
+                        world.bucketUpdate(k, page, index);
+                        const moved = entity.page.erase(entity.index);
+                        if (moved != .nil) world.bucketUpdate(moved, entity.page, entity.index);
+                        _ = remove_queue.pop();
+                    }
+                }
+            }
+
+            fn bucketGet(world: *World, key: Key, comptime info: RawQueryInfo) ?EntityView(info) {
+                _ = world;
+                _ = key;
+            }
         };
 
         pool: *BlockPool,
@@ -673,6 +798,8 @@ pub fn Context(
         }
 
         fn destroy(ctx: *Ctx) void {
+            var it = ctx.queues.iterator();
+            while (it.next()) |kv| kv.value.deinit();
             ctx.pool.alloc.destroy(ctx);
         }
     };
