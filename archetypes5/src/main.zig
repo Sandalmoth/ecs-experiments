@@ -300,6 +300,31 @@ pub const KeyGenerator = struct {
     }
 };
 
+fn isPrime(comptime T: type, value: T) bool {
+    if (value < 2) return false;
+    if (value == 2) return true;
+    for (2..value - 1) |i| if (value % i == 0) return false;
+    return true;
+}
+
+fn floorPrime(comptime T: type, value: T) T {
+    @setEvalBranchQuota(100_000);
+    var x = value;
+    while (!isPrime(T, x)) : (x -= 1) {}
+    return x;
+}
+
+test "floorPrime" {
+    try std.testing.expectEqual(2, floorPrime(u32, 2));
+    try std.testing.expectEqual(3, floorPrime(u32, 3));
+    try std.testing.expectEqual(3, floorPrime(u32, 4));
+    try std.testing.expectEqual(5, floorPrime(u32, 5));
+    try std.testing.expectEqual(5, floorPrime(u32, 6));
+    try std.testing.expectEqual(7, floorPrime(u32, 7));
+    try std.testing.expectEqual(7, floorPrime(u32, 8));
+    try std.testing.expectEqual(7, floorPrime(u32, 9));
+}
+
 // ECS - struct templated on component, queue, and resource definitions
 //       owns queues and definitions
 // components - many reader or one read/write
@@ -836,11 +861,12 @@ pub fn Context(
 
             const Bucket = struct {
                 // buckets hold a lookup table from an entity to it's location in a page
-                const capacity = std.math.floorPowerOfTwo(
+                // const capacity = std.math.floorPowerOfTwo(
+                const capacity = floorPrime(
                     usize,
                     (BlockPool.block_size - @sizeOf(usize)) /
                         (@sizeOf(?*Page) + @sizeOf(usize) + @sizeOf(u8)),
-                ); // power of two for speed (TODO benchmark prime size for better memory use)
+                ); // power of two has slightly faster (~10%) lookups, but wastes 40% of memory
 
                 len: usize,
                 pages: [capacity]?*Page,
@@ -856,12 +882,12 @@ pub fn Context(
 
                 // we should trigger split if bucket is full
                 fn full(bucket: Bucket) bool {
-                    return bucket.len * 9 > capacity * 8; // TODO benchmark percentage
+                    return bucket.len * 7 > capacity * 6;
                 }
 
                 // we should trigger merge if both buckets are empty
                 fn empty(bucket: Bucket) bool {
-                    return bucket.len * 9 < capacity; // TODO benchmark percentage
+                    return bucket.len * 7 < capacity;
                 }
 
                 fn insert(bucket: *Bucket, key: Key, page: *Page, index: usize) bool {
