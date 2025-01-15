@@ -281,4 +281,46 @@ fn benchgo(alloc: std.mem.Allocator) !void {
 
         std.debug.print("{}\t{d:.2}\n", .{ n, t });
     }
+
+    std.debug.print("--- lookup by id ---\n", .{});
+    for (ns) |n| {
+        var pool = BlockPool.init(alloc);
+        defer pool.deinit();
+        var keygen = KeyGenerator{};
+
+        var ctx = try CtxPV.create(&pool);
+        defer ctx.destroy();
+        var world = try WorldPV.create(&pool, &keygen);
+        defer world.destroy();
+
+        var h = std.AutoHashMap(Key, f64).init(alloc);
+        defer h.deinit();
+        var a = std.ArrayList(Key).init(alloc);
+        defer a.deinit();
+
+        for (0..n) |i| {
+            const x: f64 = @floatFromInt(i);
+            const e = try world.queueCreate(.{
+                .pos = .{ .x = x, .y = x },
+            });
+            try h.put(e, x);
+        }
+        try world.resolveQueues();
+
+        var it = h.keyIterator(); // effectively scramble the keys
+        while (it.next()) |k| try a.append(k.*);
+
+        var timer = try std.time.Timer.start();
+        var x: f64 = 0;
+        for (a.items) |k| {
+            const e = world.entity(k).?;
+            const pos = e.getOptional(.pos).?;
+            const vel = e.getOptional(.vel).?;
+            x += pos.x * pos.y;
+            x += vel.y * vel.y;
+        }
+        const t = @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(n));
+
+        std.debug.print("{}\t{d:.2}\n", .{ n, t });
+    }
 }

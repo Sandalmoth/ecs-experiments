@@ -1019,7 +1019,7 @@ pub fn Context(
             }
 
             /// entity lookup can fail if the key is invalid (should nil be illegal?)
-            fn entity(world: *World, key: Key) ?EntityView(.read_write_any) {
+            pub fn entity(world: *World, key: Key) ?EntityView(.read_write_any) {
                 const location = world.bucketGet(key) orelse return null;
                 return .{
                     ._page = location.page,
@@ -1037,7 +1037,7 @@ pub fn Context(
                 };
             }
 
-            fn PageIterator(comptime raw_query_info: RawQueryInfo) type {
+            pub fn PageIterator(comptime raw_query_info: RawQueryInfo) type {
                 return struct {
                     const PI = @This();
                     const query_info = raw_query_info.reify();
