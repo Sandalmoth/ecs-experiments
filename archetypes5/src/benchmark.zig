@@ -3,16 +3,11 @@ const std = @import("std");
 const Key = @import("main.zig").Key;
 const BlockPool = @import("main.zig").BlockPool;
 const KeyGenerator = @import("main.zig").KeyGenerator;
-const WorldABC = @import("main.zig").World(struct {
-    a: u32,
-    b: u32,
-    c: u32,
-}, struct {});
-const WorldPV = @import("main.zig").World(struct {
+const CtxPV = @import("main.zig").Context(struct {
     pos: Vec2d,
     vel: Vec2d,
-}, struct {});
-const WorldPV2 = @import("main.zig").World(struct {
+}, struct {}, struct {});
+const CtxPV2 = @import("main.zig").Context(struct {
     pos: Vec2d,
     vel: Vec2d,
     c1: u32,
@@ -20,7 +15,9 @@ const WorldPV2 = @import("main.zig").World(struct {
     c3: u32,
     c4: u32,
     c5: u32,
-}, struct {});
+}, struct {}, struct {});
+const WorldPV = CtxPV.World;
+const WorldPV2 = CtxPV2.World;
 
 var acc: u64 = 0;
 
@@ -30,12 +27,11 @@ pub fn main() !void {
     const alloc = gpa.allocator();
 
     try benchgo(alloc);
-    // try bench10(alloc);
 }
 
 const Vec2d = struct { x: f64, y: f64 };
 
-fn addPosVel(view: WorldPV.WorldView(.{
+fn addPosVel(view: CtxPV.View(.{
     .component_read = &.{.vel},
     .component_read_write = &.{.pos},
 })) void {
@@ -54,7 +50,7 @@ fn addPosVel(view: WorldPV.WorldView(.{
     }
 }
 
-fn insertVel(view: WorldPV.WorldView(.{
+fn insertVel(view: CtxPV.View(.{
     .component_read = &.{.pos},
 })) !void {
     var page_iterator = view.pageIterator(.{
@@ -63,12 +59,12 @@ fn insertVel(view: WorldPV.WorldView(.{
     while (page_iterator.next()) |page| {
         var entity_iterator = page.entityIterator();
         while (entity_iterator.next()) |entity| {
-            try view.world.queueInsert(entity.key(), .vel, .{ .x = 0, .y = 0 });
+            try view.queueInsert(entity.key(), .vel, .{ .x = 0, .y = 0 });
         }
     }
 }
 
-fn removeVel(view: WorldPV.WorldView(.{
+fn removeVel(view: CtxPV.View(.{
     .component_read = &.{ .pos, .vel },
 })) !void {
     var page_iterator = view.pageIterator(.{
@@ -77,12 +73,12 @@ fn removeVel(view: WorldPV.WorldView(.{
     while (page_iterator.next()) |page| {
         var entity_iterator = page.entityIterator();
         while (entity_iterator.next()) |entity| {
-            try view.world.queueRemove(entity.key(), .vel);
+            try view.queueRemove(entity.key(), .vel);
         }
     }
 }
 
-fn addPosVel2(view: WorldPV2.WorldView(.{
+fn addPosVel2(view: CtxPV2.View(.{
     .component_read = &.{.vel},
     .component_read_write = &.{.pos},
 })) void {
@@ -110,8 +106,10 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         defer pool.deinit();
         var keygen = KeyGenerator{};
 
-        var world = WorldPV.init(&pool, &keygen);
-        defer world.deinit();
+        var ctx = try CtxPV.create(&pool);
+        defer ctx.destroy();
+        var world = try WorldPV.create(&pool, &keygen);
+        defer world.destroy();
 
         for (0..n) |i| {
             const x: f64 = @floatFromInt(i);
@@ -123,7 +121,7 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         try world.resolveQueues();
 
         var timer = try std.time.Timer.start();
-        try world.eval(addPosVel);
+        try ctx.eval(world, addPosVel);
         const t = @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(n));
 
         std.debug.print("{}\t{d:.2}\n", .{ n, t });
@@ -136,8 +134,10 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         defer pool.deinit();
         var keygen = KeyGenerator{};
 
-        var world = WorldPV.init(&pool, &keygen);
-        defer world.deinit();
+        var ctx = try CtxPV.create(&pool);
+        defer ctx.destroy();
+        var world = try WorldPV.create(&pool, &keygen);
+        defer world.destroy();
 
         for (0..n * 10) |i| {
             const x: f64 = @floatFromInt(i);
@@ -155,7 +155,7 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         try world.resolveQueues();
 
         var timer = try std.time.Timer.start();
-        try world.eval(addPosVel);
+        try ctx.eval(world, addPosVel);
         const t = @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(n));
 
         std.debug.print("{}\t{d:.2}\n", .{ n, t });
@@ -167,15 +167,17 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         defer pool.deinit();
         var keygen = KeyGenerator{};
 
-        var world = WorldPV2.init(&pool, &keygen);
-        defer world.deinit();
+        var ctx = try CtxPV2.create(&pool);
+        defer ctx.destroy();
+        var world = try WorldPV2.create(&pool, &keygen);
+        defer world.destroy();
 
         var rng = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
         const rand = rng.random();
 
         for (0..n) |i| {
             const x: f64 = @floatFromInt(i);
-            var t = WorldPV2.Template{
+            var t = CtxPV2.Template{
                 .pos = .{ .x = x, .y = x },
                 .vel = .{ .x = x, .y = x },
             };
@@ -189,7 +191,7 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         try world.resolveQueues();
 
         var timer = try std.time.Timer.start();
-        try world.eval(addPosVel2);
+        try ctx.eval(world, addPosVel2);
         const t = @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(n));
 
         std.debug.print("{}\t{d:.2}\n", .{ n, t });
@@ -201,8 +203,10 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         defer pool.deinit();
         var keygen = KeyGenerator{};
 
-        var world = WorldPV.init(&pool, &keygen);
-        defer world.deinit();
+        var ctx = try CtxPV.create(&pool);
+        defer ctx.destroy();
+        var world = try WorldPV.create(&pool, &keygen);
+        defer world.destroy();
 
         _ = try world.queueCreate(.{
             .pos = .{ .x = 0, .y = 0 },
@@ -230,8 +234,10 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         defer pool.deinit();
         var keygen = KeyGenerator{};
 
-        var world = WorldPV.init(&pool, &keygen);
-        defer world.deinit();
+        var ctx = try CtxPV.create(&pool);
+        defer ctx.destroy();
+        var world = try WorldPV.create(&pool, &keygen);
+        defer world.destroy();
 
         var timer = try std.time.Timer.start();
         for (0..n) |i| {
@@ -253,8 +259,10 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         defer pool.deinit();
         var keygen = KeyGenerator{};
 
-        var world = WorldPV.init(&pool, &keygen);
-        defer world.deinit();
+        var ctx = try CtxPV.create(&pool);
+        defer ctx.destroy();
+        var world = try WorldPV.create(&pool, &keygen);
+        defer world.destroy();
 
         for (0..n) |i| {
             const x: f64 = @floatFromInt(i);
@@ -265,137 +273,12 @@ fn benchgo(alloc: std.mem.Allocator) !void {
         try world.resolveQueues();
 
         var timer = try std.time.Timer.start();
-        try world.eval(insertVel);
+        try ctx.eval(world, insertVel);
         try world.resolveQueues();
-        try world.eval(removeVel);
+        try ctx.eval(world, removeVel);
         try world.resolveQueues();
         const t = @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(n));
 
         std.debug.print("{}\t{d:.2}\n", .{ n, t });
     }
-
-    std.debug.print("--- create world ---\n", .{});
-    for (ns) |n| {
-        var pool = BlockPool.init(alloc);
-        defer pool.deinit();
-        var keygen = KeyGenerator{};
-
-        var timer = try std.time.Timer.start();
-        var world = WorldPV.init(&pool, &keygen);
-        defer world.deinit();
-        const t = @as(f64, @floatFromInt(timer.read())) / @as(f64, @floatFromInt(n));
-
-        std.debug.print("{}\t{d:.2}\n", .{ n, t });
-    }
-}
-
-var s0_it: usize = 0;
-fn system0(view: WorldABC.WorldView(.{
-    .component_read = &.{ .b, .c },
-    .component_read_write = &.{.a},
-})) void {
-    var page_iterator = view.pageIterator(.{
-        .include_read = &.{ .b, .c },
-        .include_read_write = &.{.a},
-    });
-    while (page_iterator.next()) |page| {
-        var entity_iterator = page.entityIterator();
-        while (entity_iterator.next()) |entity| {
-            entity.getPtr(.a).* *%= (entity.get(.b) +% entity.get(.c));
-            s0_it += 1;
-        }
-    }
-}
-
-var s1_it: usize = 0;
-fn system1(view: WorldABC.WorldView(.{
-    .component_read = &.{.b},
-    .component_read_write = &.{.a},
-})) void {
-    var page_iterator = view.pageIterator(.{
-        .include_read = &.{.b},
-        .include_read_write = &.{.a},
-    });
-    while (page_iterator.next()) |page| {
-        var entity_iterator = page.entityIterator();
-        while (entity_iterator.next()) |entity| {
-            entity.getPtr(.a).* +%= entity.get(.b);
-            s1_it += 1;
-        }
-    }
-}
-
-var s2_it: usize = 0;
-fn system2(view: WorldABC.WorldView(.{
-    .component_read = &.{.a},
-})) void {
-    var page_iterator = view.pageIterator(.{
-        .include_read = &.{.a},
-    });
-    while (page_iterator.next()) |page| {
-        var entity_iterator = page.entityIterator();
-        while (entity_iterator.next()) |entity| {
-            acc += entity.get(.a);
-            s2_it += 1;
-        }
-    }
-}
-
-fn bench10(alloc: std.mem.Allocator) !void {
-    var rng = std.Random.Xoshiro256.init(@intCast(std.time.microTimestamp()));
-    var rand = rng.random();
-
-    for (6..18) |log_n| {
-        const n: u32 = @as(u32, 1) << @intCast(log_n);
-
-        var pool = BlockPool.init(alloc);
-        defer pool.deinit();
-        var keygen = KeyGenerator{};
-
-        var world = WorldABC.init(&pool, &keygen);
-        defer world.deinit();
-
-        var entities = try std.ArrayList(Key).initCapacity(alloc, n);
-        defer entities.deinit();
-
-        var timer = try std.time.Timer.start();
-
-        for (0..n) |i| {
-            var t = WorldABC.Template{};
-            if (rand.float(f32) < 0.3) t.a = @intCast(i);
-            if (rand.float(f32) < 0.6) t.b = @intCast(i);
-            if (rand.float(f32) < 0.9) t.c = @intCast(i);
-            const e = try world.queueCreate(t);
-            try entities.append(e);
-        }
-        try world.resolveQueues();
-        const t_ins = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(n));
-
-        // skip del for now, maybe later
-
-        s0_it = 0;
-        try world.eval(system0);
-        const t_it0 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s0_it));
-
-        s1_it = 0;
-        try world.eval(system1);
-        const t_it1 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s1_it));
-
-        s2_it = 0;
-        try world.eval(system2);
-        const t_it2 = @as(f64, @floatFromInt(timer.lap())) / @as(f64, @floatFromInt(s2_it));
-
-        std.debug.print(
-            "{}\t{d:.2}\t{d:.2}\t{d:.2}\t{d:.2}\n",
-            .{
-                n,
-                t_ins,
-                t_it0,
-                t_it1,
-                t_it2,
-            },
-        );
-    }
-
-    std.debug.print("{}\n", .{acc});
 }
