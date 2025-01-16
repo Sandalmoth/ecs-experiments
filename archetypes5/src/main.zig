@@ -1,11 +1,14 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const zjobs = @import("zjobs");
 
 const single_threaded = builtin.single_threaded;
 
 pub const BlockPool = @import("block_pool.zig").BlockPool;
 
-// TODO FIXME there is some error in the queues, it can fail the test
+// Archetype based ecs with automatic multithreaded scheduling of systems
+// scheduler also includes message queues and arbitrary resources
+
 /// either multiple threads writing to queue, or single thread reading/writing
 const UntypedQueue = struct {
     // NOTE lock-free-ish possible?
@@ -861,8 +864,8 @@ pub fn Context(
 
             const Bucket = struct {
                 // buckets hold a lookup table from an entity to it's location in a page
-                // const capacity = std.math.floorPowerOfTwo(
-                const capacity = floorPrime(
+                const capacity = std.math.floorPowerOfTwo(
+                    // const capacity = floorPrime(
                     usize,
                     (BlockPool.block_size - @sizeOf(usize)) /
                         (@sizeOf(?*Page) + @sizeOf(usize) + @sizeOf(u8)),
@@ -1369,9 +1372,19 @@ pub fn Context(
             }
         };
 
+        const Schedule = struct {
+            id: zjobs.JobId,
+            mode: enum { none, shared, exclusive },
+        };
+
         pool: *BlockPool,
         queues: std.EnumArray(Queue, UntypedQueue),
         resources: ResourceSpec,
+
+        jobs: zjobs.JobQueue(.{}),
+        component_schedule: std.EnumArray(Component, Schedule),
+        queue_schedule: std.EnumArray(Queue, Schedule),
+        resource_schedule: std.EnumArray(Resource, Schedule),
 
         pub fn create(pool: *BlockPool) !*Ctx {
             const ctx = try pool.alloc.create(Ctx);
@@ -1379,16 +1392,30 @@ pub fn Context(
             for (0..n_queues) |i| {
                 ctx.queues[i] = UntypedQueue.init(pool);
             }
+            ctx.jobs = zjobs.JobQueue(.{}).init();
+            ctx.jobs.start(.{});
+            ctx.component_schedule = std.EnumArray(Component, Schedule).initFill(
+                .{ .id = .none, .mode = .none },
+            );
+            ctx.queue_schedule = std.EnumArray(Queue, Schedule).initFill(
+                .{ .id = .none, .mode = .none },
+            );
+            ctx.resource_schedule = std.EnumArray(Resource, Schedule).initFill(
+                .{ .id = .none, .mode = .none },
+            );
             return ctx;
         }
 
         pub fn destroy(ctx: *Ctx) void {
             var it = ctx.queues.iterator();
             while (it.next()) |kv| kv.value.deinit();
+            ctx.jobs.stop(); // TODO investigate proper shutdown
+            ctx.jobs.deinit();
             ctx.pool.alloc.destroy(ctx);
         }
 
         /// run a system in the current thread right now
+        /// such a system is allowed to return an error
         pub fn eval(ctx: *Ctx, world: *World, system: anytype) !void {
             // TODO validate system signature and produce good error messages
             const info = @typeInfo(@TypeOf(system));
@@ -1398,7 +1425,202 @@ pub fn Context(
                 try system(.{ ._ecs = ctx, ._world = world });
             }
         }
+
+        /// run a system in the job pool
+        /// a system that is scheduled is not allowed to return an error (must be void)
+        pub fn schedule(ctx: *Ctx, world: *World, system: anytype) !void {
+            if (single_threaded) return ctx.eval(world, system);
+
+            const info = @typeInfo(@TypeOf(system));
+            const V = info.@"fn".params[0].type.?;
+            const view_info = V.view_info;
+
+            // identify all jobs we need to wait on
+            var prereq: zjobs.JobId = .none;
+            if (n_components > 0) {
+                var itc = view_info.component_read.iterator();
+                while (itc.next()) |c| {
+                    const s = ctx.component_schedule.get(c);
+                    switch (s.mode) {
+                        .none, .shared => {},
+                        .exclusive => {
+                            prereq = try ctx.jobs.combine(&.{ prereq, s.id });
+                            // std.debug.print("r  waiting on  {}\n", .{c});
+                        },
+                    }
+                }
+                itc = view_info.component_read_write.iterator();
+                while (itc.next()) |c| {
+                    const s = ctx.component_schedule.get(c);
+                    switch (s.mode) {
+                        .none => {},
+                        .shared, .exclusive => {
+                            prereq = try ctx.jobs.combine(&.{ prereq, s.id });
+                            // std.debug.print("rw waiting on  {}\n", .{c});
+                        },
+                    }
+                }
+            }
+            if (n_queues > 0) {
+                var itq = view_info.queue_write.iterator();
+                while (itq.next()) |q| {
+                    const s = ctx.queue_schedule.get(q);
+                    switch (s.mode) {
+                        .none, .shared => {},
+                        .exclusive => {
+                            prereq = try ctx.jobs.combine(&.{ prereq, s.id });
+                            // std.debug.print("r  waiting on  {}\n", .{c});
+                        },
+                    }
+                }
+                itq = view_info.queue_read_write.iterator();
+                while (itq.next()) |q| {
+                    const s = ctx.queue_schedule.get(q);
+                    switch (s.mode) {
+                        .none => {},
+                        .shared, .exclusive => {
+                            prereq = try ctx.jobs.combine(&.{ prereq, s.id });
+                            // std.debug.print("rw waiting on  {}\n", .{c});
+                        },
+                    }
+                }
+            }
+            if (n_resources > 0) {
+                var itr = view_info.resource.iterator();
+                while (itr.next()) |r| {
+                    const s = ctx.resource_schedule.get(r);
+                    switch (s.mode) {
+                        .none => {},
+                        .shared, .exclusive => {
+                            prereq = try ctx.jobs.combine(&.{ prereq, s.id });
+                            // std.debug.print("rw waiting on  {}\n", .{c});
+                        },
+                    }
+                }
+            }
+
+            // schedule our job
+            const job = try ctx.jobs.schedule(
+                prereq,
+                struct {
+                    view: V,
+                    pub fn exec(self: *@This()) void {
+                        system(self.view);
+                    }
+                }{ .view = .{ ._ecs = ctx, ._world = world } },
+            );
+
+            // update wait-list with this job
+            if (n_components > 0) {
+                var itc = view_info.component_read.iterator();
+                while (itc.next()) |c| {
+                    const s = ctx.component_schedule.get(c);
+                    switch (s.mode) {
+                        .none, .exclusive => ctx.component_schedule.set(c, .{ .id = job, .mode = .shared }),
+                        .shared => {
+                            const combined = try ctx.jobs.combine(&.{ job, s.id });
+                            ctx.component_schedule.set(c, .{ .id = combined, .mode = .shared });
+                        },
+                    }
+                }
+                itc = view_info.component_read_write.iterator();
+                while (itc.next()) |c| {
+                    ctx.component_schedule.set(c, .{ .id = job, .mode = .exclusive });
+                }
+            }
+            if (n_queues > 0) {
+                var itq = view_info.queue_write.iterator();
+                while (itq.next()) |q| {
+                    const s = ctx.queue_schedule.get(q);
+                    switch (s.mode) {
+                        .none, .exclusive => ctx.queue_schedule.set(q, .{ .id = job, .mode = .shared }),
+                        .shared => {
+                            const combined = try ctx.jobs.combine(&.{ job, s.id });
+                            ctx.queue_schedule.set(q, .{ .id = combined, .mode = .shared });
+                        },
+                    }
+                }
+                itq = view_info.queue_read_write.iterator();
+                while (itq.next()) |q| {
+                    ctx.queue_schedule.set(q, .{ .id = job, .mode = .exclusive });
+                }
+            }
+            if (n_resources > 0) {
+                var itr = view_info.resource.iterator();
+                while (itr.next()) |r| {
+                    ctx.resource_schedule.set(r, .{ .id = job, .mode = .exclusive });
+                }
+            }
+        }
+
+        /// wait for job-pool to finish
+        pub fn wait(ctx: *Ctx) void {
+            if (single_threaded) return;
+            ctx.component_schedule = std.EnumArray(Component, Schedule).initFill(
+                .{ .id = .none, .mode = .none },
+            );
+            ctx.queue_schedule = std.EnumArray(Queue, Schedule).initFill(
+                .{ .id = .none, .mode = .none },
+            );
+            ctx.resource_schedule = std.EnumArray(Resource, Schedule).initFill(
+                .{ .id = .none, .mode = .none },
+            );
+        }
     };
+}
+
+test "schedule" {
+    var pool = BlockPool.init(std.testing.allocator);
+    defer pool.deinit();
+    var keygen = KeyGenerator{};
+
+    const Ctx = Context(
+        struct { x: i32, y: f32 },
+        struct {},
+        struct {},
+    );
+    const World = Ctx.World;
+
+    const c = try Ctx.create(&pool);
+    defer c.destroy();
+    const w = try World.create(&pool, &keygen);
+    defer w.destroy();
+
+    try c.schedule(w, struct {
+        fn f(view: Ctx.View(.{ .component_read = &.{ .x, .y } })) void {
+            // std.debug.print("1 - {}\n", .{std.time.milliTimestamp()});
+            std.time.sleep(1000_000_000);
+            _ = view;
+        }
+    }.f);
+
+    try c.schedule(w, struct {
+        fn f(view: Ctx.View(.{ .component_read = &.{.x} })) void {
+            // std.debug.print("2 - {}\n", .{std.time.milliTimestamp()});
+            std.time.sleep(1000_000_000);
+            _ = view;
+        }
+    }.f);
+
+    try c.schedule(w, struct {
+        fn f(view: Ctx.View(.{ .component_read_write = &.{.y} })) void {
+            // std.debug.print("3 - {}\n", .{std.time.milliTimestamp()});
+            std.time.sleep(1000_000_000);
+            _ = view;
+        }
+    }.f);
+
+    try c.schedule(w, struct {
+        fn f(view: Ctx.View(.{ .component_read = &.{ .x, .y } })) void {
+            // std.debug.print("4 - {}\n", .{std.time.milliTimestamp()});
+            std.time.sleep(1000_000_000);
+            _ = view;
+        }
+    }.f);
+
+    // TODO write a test that actually proves correctness beyond just checking timestamps by hand
+
+    c.wait();
 }
 
 test "bucket index" {

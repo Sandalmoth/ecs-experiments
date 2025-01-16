@@ -173,6 +173,7 @@ fn BlockPoolType(comptime config: BlockPoolConfig) type {
     };
 }
 
+// FIXME fix test
 test "block pool basic functions" {
     var pool = BlockPool.init(std.testing.allocator);
     defer pool.deinit();

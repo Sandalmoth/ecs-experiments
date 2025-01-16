@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const zjobs = b.dependency("zjobs", .{});
+    exe.root_module.addImport("zjobs", zjobs.module("root"));
+
     b.installArtifact(exe);
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -28,6 +31,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    bench.root_module.addImport("zjobs", zjobs.module("root"));
+
     b.installArtifact(bench);
     const bench_cmd = b.addRunArtifact(bench);
     bench_cmd.step.dependOn(b.getInstallStep());
@@ -43,6 +48,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    unit_tests.root_module.addImport("zjobs", zjobs.module("root"));
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
